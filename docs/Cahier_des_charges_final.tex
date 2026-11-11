@@ -1,0 +1,348 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Cahier des charges}
+\rhead{INSA Rouen Normandie -- Département GM}
+\cfoot{\thepage}
+
+\newcommand{\agent}{\textit{agent}}
+
+\begin{document}
+
+%----------------------------------------------------------------
+% PAGE DE GARDE
+%----------------------------------------------------------------
+\begin{titlepage}
+\centering
+{\large INSA Rouen Normandie -- Département GM\par}
+\vspace{3cm}
+{\Huge\bfseries Cahier des charges\par}
+\vspace{1cm}
+{\Large Conception d'un outil d'intelligence artificielle paramétrable pour l'apprentissage de concepts\par}
+\vspace{1cm}
+{\large Un agent tuteur pour la maîtrise d'une matière\par}
+\vfill
+\begin{tabular}{rl}
+\textbf{Auteurs :} & Adrien FERRU et Noah AGNEL\\[0.4em]
+\textbf{Encadrant :} & Aomar Osmani\\[0.4em]
+\textbf{Année :} & 2026--2027\\
+\end{tabular}
+\vspace{2cm}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%================================================================
+\section{Contexte et objectifs}
+%================================================================
+
+\subsection{Présentation du projet}
+
+L'intégration de l'intelligence artificielle dans l'éducation ouvre de nouvelles perspectives pour l'apprentissage adaptatif. De nombreux outils pédagogiques existent, mais peu offrent une personnalisation fine en fonction du niveau, des lacunes et de la manière d'apprendre de chaque apprenant.
+
+Ce projet consiste à concevoir un outil reposant sur un agent d'intelligence artificielle (agent \textit{Hermes}) capable d'accompagner un étudiant dans la maîtrise d'une matière de son cursus (par exemple une UE de mathématiques ou d'informatique). L'outil peut également être utilisé pour apprendre un concept isolé. À partir des documents fournis par l'apprenant (cours, TD, examens passés) et de ses souhaits d'apprentissage, l'agent :
+\begin{itemize}[noitemsep]
+  \item évalue le niveau initial de l'apprenant ;
+  \item mesure l'écart entre ce niveau et le niveau souhaité ;
+  \item construit un parcours ordonné de concepts à acquérir ;
+  \item génère des mini-cours écrits et des exercices ;
+  \item adapte en continu le parcours aux réponses et au style d'apprentissage de l'apprenant ;
+  \item réévalue l'apprenant en fin de parcours et reprend les points restant fragiles.
+\end{itemize}
+
+Le projet s'inscrit dans le cadre du sujet proposé Mr. Osmani. Il s'inspire en partie de l'architecture GAIAHL (\textit{A Composition and Governance Architecture for Educational AI}), dont seuls certains principes sont retenus (voir section~\ref{sec:gaiahl}).
+
+\subsection{Notions fondamentales}
+
+\begin{description}[leftmargin=!,labelwidth=4cm]
+  \item[Concept] Unité de connaissance élémentaire (ex. « produit scalaire », « récursivité »). Une matière est décomposée en un ensemble de concepts.
+  \item[Graphe de concepts] Graphe orienté $G=(C,R)$ où $C$ est l'ensemble des concepts et $R$ les relations de prérequis : $(p,c)\in R$ signifie que $p$ doit être suffisamment maîtrisé avant d'aborder $c$.
+  \item[Niveau de maîtrise] Pour un apprenant, valeur $k_c\in[0,1]$ estimant sa maîtrise du concept $c$. Le vecteur $k=(k_c)_{c\in C}$ constitue le profil de niveau.
+  \item[Niveau cible] Vecteur $k^\star=(k^\star_c)_{c\in C}$ exprimant le niveau souhaité, dérivé des objectifs de l'apprenant (maîtrise complète, focus sur un aspect, préparation d'un examen, etc.).
+  \item[Écart] Distance entre le niveau actuel et le niveau cible, qui pilote le parcours et la barre de progression.
+  \item[Parcours d'apprentissage] Suite ordonnée de mini-cours, exercices et évaluations, construite à partir de l'écart et du graphe de prérequis.
+  \item[Profil d'apprentissage] Préférences de l'apprenant (visuel, textuel, par l'exemple, rythme, etc.), déclarées ou observées.
+  \item[Agent] Programme basé sur un modèle de langage (agent Hermes) capable de planifier, d'utiliser des outils (lecture de documents, recherche web, génération de contenus, calculs) et de conserver un état entre les sessions.
+\end{description}
+
+\subsection{Problématique}
+
+Un étudiant qui souhaite maîtriser une matière est confronté à plusieurs difficultés :
+\begin{itemize}[noitemsep]
+  \item il ne sait pas précisément quelles sont ses lacunes, ni dans quel ordre les combler ;
+  \item les supports disponibles (cours, TD, annales, vidéos, livres) sont nombreux, hétérogènes, et rarement adaptés à son niveau et à sa manière d'apprendre ;
+  \item le suivi individualisé par un enseignant est limité par le temps disponible ;
+  \item les outils existants proposent souvent un parcours fixe, ou une simple recommandation de l'exercice suivant, sans mémoire à long terme de ce qui a été compris ou non, ni d'adaptation à la façon d'apprendre de l'élève.
+\end{itemize}
+
+La problématique est donc la suivante :
+\begin{quote}
+\textit{Comment concevoir un agent capable, à partir des documents et des objectifs d'un apprenant, d'évaluer son niveau, de quantifier l'écart avec le niveau visé, de générer un parcours personnalisé et de l'ajuster en continu, tout en conservant la mémoire de l'apprenant d'une session à l'autre et en garantissant la fiabilité des contenus produits ?}
+\end{quote}
+
+Deux difficultés spécifiques doivent être traitées : (i) la fiabilité des contenus générés par un modèle de langage (erreurs, hallucinations), et (ii) la fiabilité de l'estimation du niveau, qui ne doit pas être faussée par des réponses obtenues avec de l'aide ou par chance.
+
+\subsection{Objectifs du projet}
+
+L'objectif général est de réaliser un prototype fonctionnel d'agent tuteur personnalisé. Les objectifs détaillés sont :
+\begin{enumerate}[noitemsep]
+  \item étudier les approches pédagogiques et les modèles d'apprentissage adaptatif (suivi de connaissances, répétition espacée, évaluation formative) ;
+  \item développer un moteur capable de générer et d'ajuster un parcours d'apprentissage à partir d'une évaluation ;
+  \item définir une mesure d'écart entre niveau actuel et niveau cible, et une mesure de similarité entre concepts à apprendre et supports disponibles ;
+  \item intégrer un système de configuration permettant d'adapter l'outil aux besoins de l'apprenant (objectifs, style, types de ressources) ;
+  \item concevoir une interface utilisateur ergonomique ;
+  \item tester l'efficacité de l'outil sur un panel d'utilisateurs.
+\end{enumerate}
+
+\subsection{Besoins fonctionnels et non fonctionnels}
+\label{sec:besoins}
+
+\subsubsection{Description du fonctionnement attendu}
+
+Le déroulement nominal d'un parcours est le suivant.
+
+\begin{enumerate}[label=\textbf{E\arabic*.}]
+  \item \textbf{Dépôt des documents.} L'apprenant dépose, s'il en dispose, les cours, TD et examens passés relatifs à la matière ou au concept visé.
+  \item \textbf{Expression des souhaits.} L'apprenant indique ses objectifs d'apprentissage (maîtrise globale, focus sur un aspect précis, préparation d'un examen) et, optionnellement, sa manière d'apprendre (visuelle, par l'exemple, par la théorie, etc.).
+  \item \textbf{Évaluation initiale.} L'agent génère et fait passer une première évaluation couvrant les concepts de la matière.
+  \item \textbf{Calcul de l'écart.} À partir des résultats, l'agent calcule l'écart entre le niveau de l'apprenant et le niveau souhaité, concept par concept.
+  \item \textbf{Planification.} L'agent établit la liste des concepts à apprendre et détermine l'ordre de traitement en respectant les prérequis.
+  \item \textbf{Apprentissage.} L'agent crée des mini-cours écrits et des exercices que l'apprenant suit et réalise au fur et à mesure.
+  \item \textbf{Adaptation.} Pendant les exercices, l'agent s'adapte à la façon d'apprendre et de faire de l'apprenant, et revient sur les concepts mal compris et les erreurs commises.
+  \item \textbf{Évaluation finale.} Une fois tous les concepts abordés, l'apprenant passe un examen final qui réévalue son niveau.
+  \item \textbf{Remédiation.} Si le niveau est insuffisant, l'agent génère de nouveaux cours et exercices ciblés sur les parties encore fragiles, puis recommence à partir de l'étape E7.
+\end{enumerate}
+
+\subsubsection{Besoins fonctionnels}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{@{}l X@{}}
+\toprule
+\textbf{Id} & \textbf{Exigence}\\
+\midrule
+BF1 & L'apprenant peut déposer des documents (PDF, texte, images de notes) : cours, TD, examens passés.\\
+BF2 & L'apprenant peut exprimer ses souhaits : niveau cible, aspects à privilégier, temps disponible, préférences de format.\\
+BF3 & L'agent extrait des documents fournis une liste de concepts et leurs relations de prérequis, que l'apprenant peut visualiser et corriger.\\
+BF4 & L'agent génère une évaluation initiale couvrant les concepts identifiés.\\
+BF5 & L'agent calcule le niveau de l'apprenant par concept et l'écart avec le niveau souhaité.\\
+BF6 & L'agent produit la liste ordonnée des concepts à apprendre en respectant le graphe de prérequis.\\
+BF7 & L'agent génère des mini-cours écrits, structurés et adaptés au niveau de l'apprenant.\\
+BF8 & L'agent génère des exercices progressifs avec correction et explication adaptées aux erreurs commises.\\
+BF9 & L'agent met à jour le profil de niveau après chaque exercice et revient sur les concepts mal compris.\\
+BF10 & L'agent adapte la forme des contenus au style d'apprentissage de l'apprenant (déclaré ou observé).\\
+BF11 & L'agent s'appuie sur les documents fournis \textbf{et} sur des sources en ligne (textes, vidéos, exemples visuels) pour construire cours et exercices ; les sources utilisées sont citées.\\
+BF12 & L'agent génère un examen final et réévalue le niveau.\\
+BF13 & En cas de niveau insuffisant, l'agent génère un parcours de remédiation ciblé.\\
+BF14 & L'apprenant peut travailler par sessions : l'agent conserve entre les sessions le niveau, les concepts restants, les cours et exercices à faire, l'historique des erreurs et les préférences.\\
+BF15 & L'apprenant peut reprendre, suspendre ou réinitialiser son parcours, et consulter son profil de niveau.\\
+BF16 & L'apprenant peut apprendre un concept isolé sans matière complète ni documents (parcours réduit).\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsubsection{Besoins non fonctionnels}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{@{}l X@{}}
+\toprule
+\textbf{Id} & \textbf{Exigence}\\
+\midrule
+BNF1 & \textbf{Pop-ups d'intérêt (optionnels).} L'apprenant peut activer des notifications ponctuelles contenant des liens vers des sources liées au concept en cours (vidéo, article, cas d'usage concret), dans le but de susciter sa curiosité plutôt que de l'évaluer. Exemple : pour l'étude des équations de Navier--Stokes, proposer une vidéo sur le problème du millénaire associé, ou un cas concret de la vie courante. La fréquence est réglable et la fonction désactivable.\\
+BNF2 & \textbf{Encouragements.} L'agent peut féliciter l'apprenant après la réussite d'un exercice ou la clôture d'un concept ; la fonction est désactivable.\\
+BNF3 & \textbf{Barre de progression.} Une barre de progression, liée au calcul de l'écart entre le niveau actuel et le niveau visé, évolue dynamiquement après chaque cours lu, exercice et évaluation complétés. Ceci dans le but de motiver l'apprenant.\\
+BNF4 & \textbf{Ergonomie.} L'interface doit être utilisable sans formation, claire et paramétrable.\\
+BNF5 & \textbf{Fiabilité.} Les contenus générés doivent être vérifiables (sources citées) et les erreurs détectables par l'apprenant (bouton de signalement).\\
+BNF6 & \textbf{Persistance et robustesse.} L'état de l'apprenant est sauvegardé automatiquement ; aucune perte de données en cas d'interruption.\\
+BNF7 & \textbf{Performance.} Le temps de génération d'un mini-cours ou d'un exercice doit rester compatible avec un usage interactif (voir section~\ref{sec:perf}).\\
+BNF8 & \textbf{Configurabilité.} Les critères d'apprentissage et les types de ressources utilisés (textes, vidéos, exemples visuels) sont paramétrables par l'apprenant.\\
+BNF9 & \textbf{Transparence.} L'apprenant peut comprendre pourquoi un concept lui est proposé (écart constaté, prérequis manquant) et peut contester une estimation de niveau.\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+%================================================================
+\section{Choix techniques et contraintes}
+%================================================================
+
+\subsection{Langage et environnement}
+
+
+\begin{itemize}[noitemsep]
+  \item \textbf{Agent :} agent Hermes (modèle de langage avec appel d'outils), exécuté en local ou via une API, orchestrant les outils décrits ci-dessous.
+  \item \textbf{Langage principal :} Python (écosystème IA, traitement de documents, calcul numérique).
+  \item \textbf{Interface :} application web ou en local permettant le dépôt de fichiers, le passage des évaluations, l'affichage des cours et de la barre de progression.
+  \item \textbf{Outils de l'agent :} lecture et découpage de documents (PDF), recherche web et récupération de pages, recherche de vidéos, génération de cours/exercices/évaluations, calculs (niveau, écart, ordonnancement).
+  \item \textbf{Stockage :} base de données locale (par exemple SQLite) pour le profil de l'apprenant, l'état du parcours et l'historique des exercices ; base vectorielle ou index de recherche pour les documents déposés.
+  \item \textbf{Gestion de version et documentation :} Git, dépôt partagé, documentation en Markdown/\LaTeX.
+\end{itemize}
+
+\subsection{Méthodes mathématiques et algorithmiques}
+
+\paragraph{Extraction des concepts et graphe de prérequis.}
+L'agent extrait des documents une liste de concepts $C$ et propose des relations de prérequis $R$ ; le graphe $G=(C,R)$ obtenu est affiché à l'apprenant qui peut le valider ou le corriger. Le graphe doit être acyclique (DAG) ; les cycles éventuels sont détectés et signalés.
+
+\paragraph{Similarité entre concepts et supports.}
+Pour choisir les passages de cours, vidéos ou textes les plus pertinents pour un concept $c$, on compare une représentation de $c$ et celle de chaque support $s$ (distributions de termes, ou représentations vectorielles normalisées) par des mesures de dissimilarité :
+\begin{align*}
+D_{KL}(P\,\|\,Q) &= \sum_x P(x)\log\frac{P(x)}{Q(x)}
+&&\text{(divergence de Kullback--Leibler)},\\
+D_B(P,Q) &= -\ln\sum_x\sqrt{P(x)Q(x)}
+&&\text{(distance de Bhattacharyya)},\\
+W_1(P,Q) &= \inf_{\gamma\in\Pi(P,Q)}\mathbb{E}_{(x,y)\sim\gamma}\,\|x-y\|
+&&\text{(distance de Wasserstein)}.
+\end{align*}
+Ces mesures servent à classer les supports par pertinence et à détecter les concepts mal couverts par les documents fournis (qui nécessitent alors un recours à des sources externes).
+
+\paragraph{Estimation du niveau.}
+Le niveau $k_c\in[0,1]$ est initialisé par l'évaluation initiale puis mis à jour après chaque exercice. Une règle simple de mise à jour est
+\[
+k_c \leftarrow k_c + \eta\,\bigl(r - k_c\bigr),
+\]
+où $r\in[0,1]$ est le résultat de l'exercice (pondéré par sa difficulté) et $\eta$ un taux d'apprentissage. Des modèles plus élaborés (traçage bayésien de connaissances, \textit{Bayesian Knowledge Tracing}) pourront être envisagés. Un facteur d'oubli peut être ajouté pour tenir compte du temps écoulé entre deux sessions :
+\[
+k_c(t+\Delta t) = k_c(t)\,e^{-\gamma_c\Delta t}.
+\]
+
+\paragraph{Calcul de l'écart.}
+L'écart global entre le niveau actuel $k$ et le niveau visé $k^\star$ est défini par
+\[
+\Delta(k,k^\star) = \sum_{c\in C} w_c\,\bigl(k^\star_c - k_c\bigr)_+ ,
+\qquad (x)_+=\max(x,0),
+\]
+où $w_c\ge 0$ pondère l'importance du concept $c$ (plus élevée pour les aspects privilégiés par l'apprenant). Les concepts avec $k_c\ge k^\star_c$ ne contribuent pas à l'écart.
+
+\paragraph{Barre de progression.}
+La progression est dérivée directement de l'écart :
+\[
+\text{progression}(t) = 1 - \frac{\Delta(k(t),k^\star)}{\Delta(k(0),k^\star)} \in [0,1],
+\]
+où $k(0)$ est le niveau issu de l'évaluation initiale. La barre est recalculée après chaque cours lu, exercice et évaluation (une lecture de cours peut donner un gain provisoire limité, confirmé seulement par un exercice réussi).
+
+\paragraph{Ordonnancement des concepts.}
+L'ordre de traitement est obtenu par un tri topologique du sous-graphe des concepts à écart positif, en privilégiant à égalité les concepts à fort $w_c$ et à fort écart. Un concept n'est abordé que si ses prérequis atteignent un seuil de maîtrise $\theta$ :
+\[
+\text{accessible}(c) \iff \forall p\in\mathrm{Pred}(c),\ k_p\ge\theta .
+\]
+Si un prérequis est insuffisant, l'agent le réintègre au parcours avant le concept visé.
+
+\paragraph{Adaptation au style d'apprentissage.}
+L'agent maintient des préférences de format (texte, vidéo, exemple visuel, exemple concret) initialisées par la déclaration de l'apprenant, puis ajustées selon les résultats observés par type de ressource. Le style reste une préférence modifiable.
+
+\paragraph{Révision des concepts mal compris.}
+Les erreurs sont enregistrées par concept. Un concept dont le niveau chute ou dont les erreurs se répètent est replacé dans la file de révision selon un principe de répétition espacée (intervalles croissants en cas de réussite).
+
+\paragraph{Pistes avancées (optionnelles).}
+Le sujet suggère le transport optimal et la théorie du contrôle pour définir la meilleure manière de transférer un concept vers une représentation adaptée à l'apprenant. Selon l'avancement, le choix de parcours pourra être formulé comme un problème de contrôle (minimiser le temps pour réduire l'écart sous contrainte de charge cognitive) et le choix de supports comme un problème de transport optimal entre distribution du concept et distribution des ressources.
+
+\subsection{Contraintes techniques}
+
+\begin{itemize}[noitemsep]
+  \item \textbf{Fiabilité des contenus générés :} un modèle de langage peut produire des erreurs. Les contenus doivent être ancrés dans les documents fournis ou dans des sources citées, et les exercices doivent être accompagnés d'une solution vérifiable (vérification automatique lorsque possible).
+  \item \textbf{Séparation évaluation / interaction :} le niveau ne doit pas être mis à jour à partir des seules réponses obtenues avec aide (indices, explications fournies par l'agent) ; seules les réponses à des exercices ou évaluations sans aide comptent pleinement.
+  \item \textbf{Qualité des documents déposés :} formats variés, scans de mauvaise qualité, notes manuscrites ; une étape de vérification par l'apprenant est prévue.
+  \item \textbf{Sources en ligne :} disponibilité, qualité et droits variables ; l'agent privilégie des sources reconnues et cite systématiquement les liens, sans reproduire de contenus protégés.
+  \item \textbf{Mémoire persistante :} l'état de l'apprenant doit être stocké de manière structurée et réutilisable d'une session à l'autre.
+  \item \textbf{Coût et latence :} limitation du nombre d'appels au modèle et des tailles de contexte.
+  \item \textbf{Ressources et calendrier :} projet à réaliser en binôme dans le temps imparti du module.
+\end{itemize}
+
+%----------------------------------------------------------------
+\paragraph{Inspiration de l'architecture GAIAHL.}\label{sec:gaiahl}
+L'article GAIAHL présente une architecture complète de gouvernance de l'IA éducative. Notre projet en est une version simplifiée et n'en reprend que les principes suivants :
+\begin{itemize}[noitemsep]
+  \item \textbf{Graphe de concepts validé par l'humain :} le graphe extrait automatiquement est proposé, mais validé par l'apprenant (ou un enseignant).
+  \item \textbf{Barrière de prérequis :} un concept n'est considéré comme acquis que si ses prérequis sont suffisamment stables.
+  \item \textbf{Distinction entre types d'objets :} exercice avec aide, exercice sans aide, évaluation et examen final sont enregistrés séparément et n'ont pas le même poids dans le niveau.
+  \item \textbf{Contenu généré non autoritaire :} un cours ou une explication générée par l'agent ne modifie pas à lui seul le niveau de l'apprenant.
+  \item \textbf{Mémoire gouvernée et profil négociable :} le profil de niveau est consultable, et l'apprenant peut contester une estimation, ce qui déclenche une nouvelle vérification (exercice ou mini-test) plutôt qu'une modification directe.
+\end{itemize}
+Les aspects institutionnels de l'article (notes, certification, gouvernance complète, validation synthétique à grande échelle) ne seront pas présents dans ce projet.
+
+%================================================================
+\section{Critères de réussite}
+%================================================================
+
+\subsection{Critères de performance}
+\label{sec:perf}
+
+Les critères suivants permettent d'évaluer l'outil. Les seuils sont indicatifs et pourront être ajustés après odes tests.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{@{}l X X@{}}
+\toprule
+\textbf{Critère} & \textbf{Mesure} & \textbf{Objectif indicatif}\\
+\midrule
+Gain d'apprentissage & Différence entre score de l'examen final et de l'évaluation initiale, sur les concepts ciblés & Gain positif significatif pour la majorité des testeurs\\
+Réduction de l'écart & $\Delta(k(T),k^\star)$ en fin de parcours par rapport à $\Delta(k(0),k^\star)$ & Réduction d'au moins 70\,\%\\
+Fiabilité de l'estimation & Corrélation entre niveau estimé et résultat à un test indépendant & Corrélation élevée (ex. $>0{,}7$)\\
+Qualité des contenus & Taux de cours/exercices jugés corrects et pertinents après relecture & $\ge 90\,\%$\\
+Adaptation & Amélioration des résultats après adaptation (concepts révisés, changement de format) & Observable sur les concepts révisés\\
+Mémoire entre sessions & Reprise correcte de l'état (niveau, concepts restants, exercices) & 100\,\% des reprises sans perte\\
+Temps de réponse & Délai de génération d'un mini-cours ou d'un exercice & Quelques dizaines de secondes au plus\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+
+\subsection{Satisfaction des exigences}
+
+Le projet sera considéré comme abouti si :
+\begin{itemize}[noitemsep]
+  \item l'ensemble du scénario nominal (E1 à E9) peut être déroulé de bout en bout sur au moins une matière réelle ;
+  \item tous les besoins fonctionnels BF1 à BF16 sont couverts, éventuellement avec un niveau de finition variable pour les plus avancés ;
+  \item les besoins non fonctionnels BNF1 à BNF9 sont satisfaits, en particulier la mémoire entre sessions, la barre de progression et les options (pop-ups d'intérêt, félicitations) ;
+  \item les critères de performance de la section précédente sont mesurés et discutés, même lorsque les objectifs ne sont pas tous atteints ;
+  \item une traçabilité est établie entre chaque exigence et le test ou la démonstration qui la valide (matrice de conformité jointe au rapport).
+\end{itemize}
+
+%================================================================
+\section{Livrables attendus}
+%================================================================
+
+\subsection{Livrables techniques}
+\begin{itemize}[noitemsep]
+  \item Prototype fonctionnel de l'outil : agent Hermes configuré, moteur de génération et d'adaptation du parcours, interface utilisateur, module de mémoire persistante.
+  \item Code source commenté et dépôt Git, avec instructions d'installation et de lancement.
+  \item Module de calcul du niveau, de l'écart, de la similarité et de la progression, avec tests unitaires.
+  \item Jeux de test : documents d'exemple, évaluations générées, parcours types.
+\end{itemize}
+
+\subsection{Livrables documentaires}
+\begin{itemize}[noitemsep]
+  \item Le présent cahier des charges et des spécifications techniques.
+  \item Étude théorique de la mesure du transfert de connaissances (mesures de dissimilarité, écart, suivi du niveau).
+  \item Rapport d'analyse des résultats des tests utilisateurs et recommandations d'amélioration.
+  \item Manuel utilisateur succinct.
+\end{itemize}
+
+\subsection{Livrables complémentaires}
+\begin{itemize}[noitemsep]
+  \item Preuve de concept (POC) démontrant le fonctionnement de la solution sur quelques exemples : une matière complète (avec documents déposés) et un concept isolé.
+  \item Démonstration illustrant plusieurs sessions successives avec reprise de l'état.
+  \item Présentation orale et support de soutenance.
+\end{itemize}
+
+\end{document}

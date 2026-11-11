@@ -1,0 +1,58 @@
+Pedagogical domain pipeline
+============================
+
+This module contains three pure calculations. It does not store data, create
+an interface, use SQLite, or call a language model.
+
+Inputs
+------
+
+For each concept, keep a current mastery level and a desired target level on
+the [0, 1] scale. A concept weight expresses its relative importance. Weights
+must be finite and non-negative; if omitted, all concepts are equally weighted.
+
+Step 1: update one concept level
+--------------------------------
+
+Call update_level(current, result, eta, aided=False) after an attempt.
+
+1. Check that current level, observed result, and learning rate eta are each
+   in [0, 1].
+2. If the attempt was aided, return the existing current level unchanged.
+3. Otherwise calculate current + eta * (result - current).
+   eta=0 keeps the old level; eta=1 adopts the observed result.
+
+Step 2: calculate the weighted gap
+----------------------------------
+
+Call weighted_gap(current_levels, target_levels, weights=None).
+
+1. Require current and target maps to contain exactly the same concept keys.
+2. Validate all current and target levels in [0, 1].
+3. If no weights are given, assign weight 1 to each concept. If weights are
+   supplied, require the same keys and finite, non-negative values.
+4. For each concept, calculate max(target - current, 0). Concepts at or above
+   target therefore contribute zero shortfall.
+5. Sum weight * shortfall and divide by the sum of all weights. The result is a
+   weighted mean in [0, 1]. If all weights are zero, return 0.
+
+Step 3: calculate progress from the initial gap
+-----------------------------------------------
+
+Call progression(initial_gap, current_gap), typically with the original gap
+and the latest gap computed in Step 2.
+
+1. Validate both gaps in [0, 1].
+2. If the initial gap is zero, return 1 when the current gap is also zero;
+   otherwise return 0. This avoids division by zero.
+3. Otherwise calculate (initial_gap - current_gap) / initial_gap.
+4. Clamp the result to [0, 1]: a larger gap reports no progress and a closed gap
+   cannot report more than complete progress.
+
+Typical orchestration
+---------------------
+
+For an independent attempt, update the relevant concept level with Step 1,
+then recalculate the current weighted gap with Step 2, then compare it to the
+saved initial gap with Step 3. An aided attempt leaves its level unchanged, so
+the subsequent gap and progress calculations reflect no mastery update.
