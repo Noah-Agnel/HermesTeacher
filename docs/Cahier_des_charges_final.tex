@@ -218,9 +218,9 @@ Ces mesures servent à classer les supports par pertinence et à détecter les c
 \paragraph{Estimation du niveau.}
 Le niveau $k_c\in[0,1]$ est initialisé par l'évaluation initiale puis mis à jour après chaque exercice. Une règle simple de mise à jour est
 \[
-k_c \leftarrow k_c + \eta\,\bigl(r - k_c\bigr),
+k_c \leftarrow k_c + \eta\,a\,d\,\bigl(r - k_c\bigr),
 \]
-où $r\in[0,1]$ est le résultat de l'exercice (pondéré par sa difficulté) et $\eta$ un taux d'apprentissage. Des modèles plus élaborés (traçage bayésien de connaissances, \textit{Bayesian Knowledge Tracing}) pourront être envisagés. Un facteur d'oubli peut être ajouté pour tenir compte du temps écoulé entre deux sessions :
+où $r\in[0,1]$ est le score brut de la réponse, $\eta\in[0,1]$ le taux d'apprentissage, $a\in[0,1]$ le coefficient d'aide et $d\in[0,1]$ le coefficient de difficulté estimé par l'agent. Par défaut, $a=d=1$ : plus l'aide fournie est importante, plus $a$ est proche de 0 ; plus l'exercice est difficile et informatif, plus $d$ est proche de 1 (les exercices faciles ou peu discriminants reçoivent un $d$ plus faible). Les coefficients modulent l'influence du résultat sur le niveau estimé sans modifier le score brut ; si $a=0$ ou $d=0$, le niveau ne change pas. Le seuil de maîtrise des prérequis est fixé à $\theta=0{,}75$ pour le prototype initial ; cette valeur sera réévaluée après les essais. Des modèles plus élaborés (traçage bayésien de connaissances, \textit{Bayesian Knowledge Tracing}) pourront être envisagés. Un facteur d'oubli peut être ajouté pour tenir compte du temps écoulé entre deux sessions :
 \[
 k_c(t+\Delta t) = k_c(t)\,e^{-\gamma_c\Delta t}.
 \]
@@ -241,7 +241,7 @@ La progression est dérivée directement de l'écart :
 où $k(0)$ est le niveau issu de l'évaluation initiale. La barre est recalculée après chaque cours lu, exercice et évaluation (une lecture de cours peut donner un gain provisoire limité, confirmé seulement par un exercice réussi).
 
 \paragraph{Ordonnancement des concepts.}
-L'ordre de traitement est obtenu par un tri topologique du sous-graphe des concepts à écart positif, en privilégiant à égalité les concepts à fort $w_c$ et à fort écart. Un concept n'est abordé que si ses prérequis atteignent un seuil de maîtrise $\theta$ :
+L'ordre de traitement est obtenu par un tri topologique du sous-graphe des concepts à écart positif, en privilégiant à égalité les concepts à fort $w_c$ et à fort écart. Pour le prototype, le seuil de maîtrise des prérequis est initialisé à $\theta=0{,}75$ sur l'échelle $[0,1]$ et pourra être réévalué à partir des résultats d'essais. Un concept n'est abordé que si ses prérequis atteignent ce seuil :
 \[
 \text{accessible}(c) \iff \forall p\in\mathrm{Pred}(c),\ k_p\ge\theta .
 \]
@@ -274,7 +274,7 @@ L'article GAIAHL présente une architecture complète de gouvernance de l'IA éd
 \begin{itemize}[noitemsep]
   \item \textbf{Graphe de concepts validé par l'humain :} le graphe extrait automatiquement est proposé, mais validé par l'apprenant (ou un enseignant).
   \item \textbf{Barrière de prérequis :} un concept n'est considéré comme acquis que si ses prérequis sont suffisamment stables.
-  \item \textbf{Distinction entre types d'objets :} exercice avec aide, exercice sans aide, évaluation et examen final sont enregistrés séparément et n'ont pas le même poids dans le niveau.
+  \item \textbf{Distinction entre types d'objets :} exercice avec aide, exercice sans aide, évaluation et examen final sont enregistrés séparément. Pour le prototype initial, ils suivent la même règle de mise à jour du niveau ; les coefficients d'aide et de difficulté modulent l'influence de chaque réponse.
   \item \textbf{Contenu généré non autoritaire :} un cours ou une explication générée par l'agent ne modifie pas à lui seul le niveau de l'apprenant.
   \item \textbf{Mémoire gouvernée et profil négociable :} le profil de niveau est consultable, et l'apprenant peut contester une estimation, ce qui déclenche une nouvelle vérification (exercice ou mini-test) plutôt qu'une modification directe.
 \end{itemize}

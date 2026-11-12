@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Nouveau concept — HermesTeacher{% endblock %}
+{% block content %}
+<h1>Nouveau concept</h1>
+<p class="lead">Déposez vos documents de cours, exercices ou examens, puis précisez vos objectifs. Le tuteur propose un graphe de sous-concepts et une évaluation initiale.</p>
+
+{% if errors %}
+<div class="errors">
+  {% for error in errors %}<p>{{ error }}</p>{% endfor %}
+</div>
+{% endif %}
+
+<form method="post" action="/concepts/new" enctype="multipart/form-data" class="form">
+  <label>Titre du concept
+    <input type="text" name="title" required value="{{ title }}" placeholder="Ex. Produit scalaire">
+  </label>
+
+  <label>Documents (cours, exercices, examens — PDF, Markdown ou texte)
+    <input type="file" name="files" multiple accept=".pdf,.md,.markdown,.txt">
+  </label>
+
+  <label>Objectifs / consignes (optionnel)
+    <textarea name="objectives" rows="4" placeholder="Ex. : maîtriser le produit scalaire ; insister sur les applications concrètes ; je bloque sur les démonstrations.">{{ objectives }}</textarea>
+  </label>
+
+  <div class="form-row">
+    <label>Format préféré
+      <select name="format">
+        <option value="texte" {% if format == 'texte' %}selected{% endif %}>Texte</option>
+        <option value="exemples" {% if format == 'exemples' %}selected{% endif %}>Par l'exemple</option>
+        <option value="visuel" {% if format == 'visuel' %}selected{% endif %}>Visuel</option>
+        <option value="theorie" {% if format == 'theorie' %}selected{% endif %}>Théorie</option>
+      </select>
+    </label>
+    <label>Temps disponible (min/jour)
+      <input type="number" name="daily_minutes" min="0" value="{{ daily_minutes }}">
+    </label>
+  </div>
+
+  <label>Points à privilégier (optionnel)
+    <input type="text" name="focus" value="{{ focus }}" placeholder="Ex. : les applications du produit scalaire">
+  </label>
+
+  <label>Points de difficulté (optionnel)
+    <input type="text" name="difficulties" value="{{ difficulties }}" placeholder="Ex. : je struggle avec les démonstrations">
+  </label>
+
+  <details class="advanced">
+    <summary>Réglages avancés</summary>
+    <div class="form-row">
+      <label>Taux d'apprentissage (eta)
+        <input type="number" name="eta" step="0.05" min="0" max="1" value="{{ eta }}">
+      </label>
+      <label>Seuil de maîtrise des prérequis (theta)
+        <input type="number" name="theta" step="0.05" min="0" max="1" value="{{ theta }}">
+      </label>
+    </div>
+  </details>
+
+  <button class="btn btn-primary" type="submit">Créer le concept</button>
+</form>
+{% endblock %}

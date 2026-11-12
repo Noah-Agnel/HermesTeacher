@@ -1,0 +1,80 @@
+Learning-path orchestration
+===========================
+
+`backend/tutor/orchestration.py` drives the nominal flow: initial evaluation,
+learning, adaptation, final exam and remediation. It keeps every deterministic
+decision (levels, gaps, ordering, progress, persistence) in the backend and
+delegates every non-deterministic task to the Generator protocol.
+
+Generator protocol
+------------------
+The agent/LLM implements Generator:
+
+- propose_graph(passages, objectives, preferences) -> graph mapping
+- generate_initial_evaluation(concepts, passages, objectives, preferences)
+  -> {"questions": [...]}
+- generate_course(concept, passages, current_level, preferences) -> course mapping
+- generate_exercise(concept, passages, current_level, preferences) -> question mapping
+- generate_final_exam(concepts, passages, objectives, preferences)
+  -> {"questions": [...]}
+- grade_response(question, response_text)
+  -> {"score", "assistance_coefficient", "feedback"}
+
+The engine validates every mapping: required fields, unit-interval
+coefficients, known concept ids, and citations that must reference real
+passages. Invalid output raises ValueError and nothing is persisted.
+
+Phases
+------
+Parcours(store, learner_id, generator, eta=0.3, prerequisite_threshold=0.75)
+
+- start(documents, objectives, preferences): saves the documents, proposes and
+  validates the graph, generates the initial evaluation, stores both, and sets
+  the phase to initial_evaluation.
+- submit_initial_evaluation(responses): grades each answer, initializes the
+  concept levels (eta = 1), stores the mastery, completes the assessment and
+  computes the initial gap. The phase becomes learning.
+- next_activity(): uses plan_concepts to select the next concept, generates a
+  mini-course and an exercise for it, stores both, and returns them. When no
+  concept remains, returns {"type": "final_exam"}.
+- next_lesson(): selects the next concept and generates and stores a
+  mini-course for it; the state records the current concept. When no concept
+  remains, returns {"type": "final_exam"}. Used by the interface's
+  "Next lesson" button.
+- next_exercise(): generates and stores an exercise for the current concept
+  (or the next one when no lesson is in progress). The state records the
+  current assessment. Used by the interface's "Next exercice" button.
+- resume_learning(): restarts the learning phase after an insufficient final
+  exam, keeping the levels and the initial gap.
+- submit_exercise(response_text): grades the exercise, updates the level with
+  eta, completes the assessment and records a progress snapshot.
+- start_final_exam(): generates and stores the final exam.
+- submit_final_exam(responses): grades, re-evaluates the levels, records the
+  final progress and decides whether the levels are sufficient. The phase
+  becomes completed.
+- remediate(): returns the concepts that still need work, using plan_concepts.
+
+State
+-----
+The phase, graph id, initial gap, current assessment, current concept,
+objectives and preferences are persisted in the parcours_state table, so a
+session can be resumed by constructing a new Parcours on the same store.
+
+Deterministic rules
+-------------------
+- Initial levels: k starts at 0 and each evaluation answer is applied with
+  eta = 1, so k = a * d * r for the first answer; later answers average in.
+- Learning and final exam: k <- k + eta * a * d * (r - k), with a provisional
+  default eta = 0.3 (configurable on the Parcours constructor).
+- Gap: weighted_gap of the concept shortfalls; progress: progression from the
+  initial gap.
+- Sufficiency: every concept level is at or above its target level.
+- A course read never changes a level; only scored exercises and exams do.
+
+LLM adapter
+-----------
+`backend/tutor/llm.py` provides PromptLLMGenerator, which builds a prompt per
+task and parses the model's JSON (markdown fences and surrounding prose are
+handled). The caller supplies the `complete` callable, so the Hermes agent or
+any model API can be plugged in. The prompts are starting points and should be
+refined against real model outputs.

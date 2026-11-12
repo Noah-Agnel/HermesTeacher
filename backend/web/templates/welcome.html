@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Mes concepts — HermesTeacher{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1>Mes concepts</h1>
+  <a class="btn btn-primary" href="/concepts/new">+ Nouveau concept</a>
+</div>
+
+{% if concepts %}
+<div class="concept-grid">
+  {% for concept in concepts %}
+  <a class="concept-card" href="/concepts/{{ concept.concept_id }}">
+    <div class="concept-card-title">{{ concept.title }}</div>
+    <div class="concept-card-phase">
+      <span class="badge badge-{{ concept.phase }}">{{ phase_label(concept.phase) }}</span>
+    </div>
+    <div class="progress">
+      <div class="progress-bar" style="width: {{ (concept.progress * 100)|round }}%"></div>
+    </div>
+    <div class="concept-card-meta">
+      {{ (concept.progress * 100)|round }} % · {{ concept.concept_count }} sous-concepts
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">Aucun concept pour le moment. Cliquez sur « Nouveau concept » pour déposer vos documents et démarrer.</p>
+{% endif %}
+{% endblock %}

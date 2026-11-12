@@ -1,0 +1,157 @@
+Persistent learner storage
+==========================
+
+`backend/tutor/storage.py` stores learner data in a local SQLite database. The
+storage layer itself uses only the Python standard library. It does not
+generate content, call a model, or decide mastery levels; it persists what the
+domain engine and the orchestration compute.
+
+Scope
+-----
+Stored:
+- learner profile: id, display name, preferences, creation/update timestamps;
+- attempts: assessments (exercise, evaluation, final exam) with their status,
+  source metadata and raw score;
+- questions: position, concept id, prompt, reference answer, grading rubric,
+  difficulty coefficient and citations;
+- responses: attempt number, text, raw score, assistance coefficient, feedback
+  and submission timestamp;
+- journey state: concept mastery (current/target level, weight, label) and
+  progress snapshots (initial/current gap, progress fraction);
+- deposited documents and their passages, with page and heading references;
+- concept graphs (proposed, validated or corrected) with per-concept and
+  per-edge evidence;
+- generated mini-courses with their citations;
+- the learning-path state: phase, graph id, initial gap, current assessment,
+  current concept, objectives and preferences.
+
+Not stored:
+- the extraction of concepts and relations from the documents: the agent
+  proposes them and the graph module validates and corrects them;
+- the vector index used for retrieval. Passages are stored and citable, but
+  semantic search over them is a later step;
+- the model's raw prompts and completions. Only the validated content and
+  grades are persisted.
+
+Schema
+------
+Defined below; every write is validated before it reaches SQL.
+
+- learners(learner_id PK, display_name, preferences_json, created_at, updated_at)
+- assessments(assessment_id PK, learner_id FK, kind, status,
+  source_metadata_json, raw_score, created_at, completed_at)
+- assessment_questions(question_id PK, assessment_id FK, position, concept_id,
+  prompt, reference_answer, grading_rubric, difficulty_coefficient,
+  citations_json)
+- responses(response_id PK, question_id FK, attempt_number, response_text,
+  raw_score, assistance_coefficient, feedback, submitted_at)
+- concept_mastery(learner_id FK, concept_id, concept_label, current_level,
+  target_level, weight, updated_at, PK(learner_id, concept_id))
+- progress_snapshots(snapshot_id PK, learner_id FK, assessment_id,
+  initial_gap, current_gap, progress_fraction, recorded_at)
+- documents(document_id PK, learner_id FK, title, source, media_type,
+  metadata_json, created_at)
+- passages(passage_id PK, document_id FK, ordinal, page, heading, text)
+- concept_graphs(graph_id PK, learner_id FK, status, notes,
+  source_document_ids_json, created_at, updated_at)
+- graph_concepts(graph_id FK, concept_id, label, description, target_level,
+  weight, evidence_json, PK(graph_id, concept_id))
+- graph_edges(graph_id FK, prerequisite_id, concept_id, evidence_json,
+  PK(graph_id, prerequisite_id, concept_id))
+- courses(course_id PK, learner_id FK, concept_id, title, content,
+  citations_json, created_at)
+- parcours_state(learner_id PK FK, graph_id, phase, initial_gap,
+  current_assessment_id, current_concept_id, objectives, preferences_json,
+  updated_at)
+
+`kind` is one of exercise, evaluation, final_exam. `status` is one of
+in_progress, completed, abandoned for assessments, and proposed, validated,
+corrected for graphs. The parcours phase is one of not_started,
+initial_evaluation, learning, final_exam, completed. Levels, scores and
+coefficients are in [0, 1]. A response's raw score is stored unchanged; the
+assistance coefficient is stored with the response and the difficulty
+coefficient with the question. They modulate the level update computed by the
+domain engine, not the score.
+
+Guarantees
+----------
+- `initialize()` creates the tables idempotently; reopening the same file is
+  safe and does not duplicate or drop data.
+- Foreign keys are enforced (`PRAGMA foreign_keys = ON`); deleting a learner
+  cascades to its assessments, questions, responses, mastery, snapshots,
+  documents, passages, graphs and courses.
+- Documents, passages, graphs and courses are scoped to a learner: reading
+  another learner's rows returns `None`, and saving over another learner's row
+  raises.
+- Every write runs in a transaction: commit on success, rollback on error.
+- Invalid identifiers, kinds, levels, scores and coefficients raise
+  `ValueError` before any row is written.
+- `progress_fraction` is computed by `domain.progression`, never supplied by
+  the caller, so the stored fraction is always consistent with the gaps.
+- Attempt numbers are unique per question and auto-incremented by default.
+- Questions can only be added, and responses only recorded, while an
+  assessment is in progress; completing twice is rejected.
+- Saving a document, graph or course again replaces its content and keeps its
+  creation timestamp.
+
+API
+---
+SQLiteStore(database_path)
+create_learner(learner_id, display_name=None, preferences=None)
+get_learner(learner_id) -> dict | None
+create_assessment(assessment_id, learner_id, kind, source_metadata=None)
+add_question(assessment_id, question_id, position, prompt, reference_answer="",
+             grading_rubric="", concept_id=None, difficulty_coefficient=1.0,
+             citations=None)
+record_response(response_id, question_id, response_text, score,
+                assistance_coefficient=1.0, attempt_number=None, feedback="") -> int
+complete_assessment(assessment_id, raw_score)
+get_assessment(assessment_id) -> dict | None
+save_mastery(learner_id, concept_id, current_level, target_level=1.0,
+             weight=1.0, concept_label=None)
+get_mastery(learner_id) -> list[dict]
+record_progress(learner_id, initial_gap, current_gap, assessment_id=None) -> str
+get_progress_history(learner_id) -> list[dict]
+save_document(learner_id, document)
+get_document(learner_id, document_id) -> dict | None
+  Each passage includes its document_id, so the orchestration can cite the
+  source document of a passage.
+list_documents(learner_id) -> list[dict]
+save_graph(learner_id, proposal, status="proposed")
+get_graph(learner_id, graph_id) -> dict | None
+list_graphs(learner_id) -> list[dict]
+set_graph_status(learner_id, graph_id, status)
+save_course(learner_id, course_id, concept_id, title, content="",
+            citations=None)
+get_course(learner_id, course_id) -> dict | None
+list_courses(learner_id, concept_id=None) -> list[dict]
+save_parcours_state(learner_id, phase, graph_id=None, initial_gap=None,
+                    current_assessment_id=None, current_concept_id=None,
+                    objectives="", preferences=None)
+get_parcours_state(learner_id) -> dict | None
+
+Limitations
+-----------
+- The concept graph is stored, but its extraction from documents is the
+  agent's job; the graph module validates and corrects a proposal.
+- A learner's profile and preferences are written at creation and read back,
+  but there is no update method yet; configuration changes belong to a later
+  step.
+- Assessments are read by id. There is no listing method yet, so a history view
+  would need one; resuming a known assessment works.
+- There is no schema migration mechanism; evolving the schema requires a
+  migration strategy. Existing databases created before a schema change must
+  be recreated.
+
+Verification
+-------------
+Run the persistence tests with:
+
+    python -m unittest discover -v
+
+`backend/tests/test_storage.py` reopens the same database file after writing
+and checks the profile, an assessment with its questions and responses, the
+concept mastery, the progress history, the documents and passages, the concept
+graphs with their evidence, the courses and the learning-path state. It also
+checks that invalid inputs are rejected, that rows are scoped to the learner,
+and that an in-progress assessment can be resumed.

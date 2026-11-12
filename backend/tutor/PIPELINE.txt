@@ -1,58 +1,91 @@
-Pedagogical domain pipeline
-============================
+Pedagogical domain engine
+=========================
 
-This module contains three pure calculations. It does not store data, create
-an interface, use SQLite, or call a language model.
+This module contains pure domain models and calculations. It does not store
+learner data, create an interface, generate tests, use SQLite, or call a model.
 
-Inputs
-------
+Concept model and graph
+-----------------------
 
-For each concept, keep a current mastery level and a desired target level on
-the [0, 1] scale. A concept weight expresses its relative importance. Weights
-must be finite and non-negative; if omitted, all concepts are equally weighted.
+Create each concept as Concept(id, prerequisites=frozenset(), target_level=1.0,
+weight=1.0), then pass a mapping from concept id to Concept.
 
-Step 1: update one concept level
---------------------------------
+- The target level is in [0, 1]. The weight is finite and non-negative.
+- Prerequisite ids must exist in the mapping; each mapping key must match the
+  Concept.id.
+- topological_order(concepts) validates the graph and returns a deterministic
+  order. Missing prerequisites and cycles raise ValueError.
 
-Call update_level(current, result, eta, aided=False) after an attempt.
+Planning
+--------
 
-1. Check that current level, observed result, and learning rate eta are each
-   in [0, 1].
-2. If the attempt was aided, return the existing current level unchanged.
-3. Otherwise calculate current + eta * (result - current).
-   eta=0 keeps the old level; eta=1 adopts the observed result.
+Call plan_concepts(concepts, current_levels, prerequisite_threshold=0.75).
 
-Step 2: calculate the weighted gap
-----------------------------------
+- current_levels must contain exactly the concept ids, each with a level in
+  [0, 1]. The prerequisite threshold defaults to 0.75 and can be overridden.
+  This is the prototype's initial operational definition of sufficient mastery;
+  it should be reviewed against observed exercise and evaluation results.
+- Include every concept whose current level is below its target.
+- If a selected concept has a prerequisite below the threshold, add that
+  prerequisite even if it has already reached its own target. Apply the same
+  check recursively to prerequisites of prerequisites.
+- Return a prerequisite-safe topological order. Among concepts currently
+  available to work on, prioritize larger concept weight, then larger relevant
+  shortfall, then lexicographically smaller id. A prerequisite added only to
+  reach the threshold uses its shortfall to that threshold for prioritization.
+- Return an empty tuple when no concept is below target or needs prerequisite
+  remediation.
+
+Attempts and mastery updates
+----------------------------
+
+AttemptType distinguishes EXERCISE, EVALUATION, and FINAL_EXAM. Attempt stores
+(kind, score, assistance_coefficient, difficulty_coefficient). The score and
+both coefficients are in [0, 1]. The assistance coefficient defaults to 1.0;
+lower values represent more substantial assistance. The difficulty coefficient
+defaults to 1.0; the tutor should give more difficult and informative exercises
+a higher value and easy or weakly discriminating exercises a lower value.
+Evaluation and final-exam categories are recorded, but use the same update rule
+for now, as requested.
+
+Call update_level(current, result, eta, assistance_coefficient=1.0,
+difficulty_coefficient=1.0), or update_level_from_attempt(current, attempt, eta).
+Both calculate:
+
+    eta_effective = eta * assistance_coefficient * difficulty_coefficient
+    current + eta_effective * (result - current)
+
+The coefficients change how strongly the response updates mastery, not the raw
+score. A help coefficient of 0 leaves the level unchanged; larger difficulty
+coefficients make the exercise more influential. The backend validates the
+level, score, eta, and both coefficients in [0, 1].
+
+Weighted gap and progression
+----------------------------
 
 Call weighted_gap(current_levels, target_levels, weights=None).
 
-1. Require current and target maps to contain exactly the same concept keys.
-2. Validate all current and target levels in [0, 1].
-3. If no weights are given, assign weight 1 to each concept. If weights are
-   supplied, require the same keys and finite, non-negative values.
-4. For each concept, calculate max(target - current, 0). Concepts at or above
-   target therefore contribute zero shortfall.
-5. Sum weight * shortfall and divide by the sum of all weights. The result is a
-   weighted mean in [0, 1]. If all weights are zero, return 0.
+- Current and target maps must contain exactly the same concept ids; all levels
+  must be in [0, 1].
+- If omitted, weights default to 1. Otherwise weights must contain exactly the
+  same ids and be finite and non-negative.
+- The gap is the sum of weight * max(target - current, 0), as defined in the
+  specification. It may exceed 1. If all weights are zero, return 0.
 
-Step 3: calculate progress from the initial gap
------------------------------------------------
-
-Call progression(initial_gap, current_gap), typically with the original gap
-and the latest gap computed in Step 2.
-
-1. Validate both gaps in [0, 1].
-2. If the initial gap is zero, return 1 when the current gap is also zero;
-   otherwise return 0. This avoids division by zero.
-3. Otherwise calculate (initial_gap - current_gap) / initial_gap.
-4. Clamp the result to [0, 1]: a larger gap reports no progress and a closed gap
-   cannot report more than complete progress.
+Call progression(initial_gap, current_gap) to calculate the clamped fraction of
+the original gap closed. Gaps must be finite and non-negative. If the initial
+gap is zero, return 1 when the current gap is also zero, otherwise 0.
 
 Typical orchestration
 ---------------------
 
-For an independent attempt, update the relevant concept level with Step 1,
-then recalculate the current weighted gap with Step 2, then compare it to the
-saved initial gap with Step 3. An aided attempt leaves its level unchanged, so
-the subsequent gap and progress calculations reflect no mastery update.
+For a scored response, create an Attempt with its category and the assistance
+and difficulty coefficients estimated by the tutor. Update the associated
+concept level with update_level_from_attempt, then recalculate weighted_gap
+and progression. Use plan_concepts to obtain the current prerequisite-safe work
+order. The web interface in `backend/web/` (see `WEB.txt`) connects this
+pipeline to the learner. Persistent learner state, documents, concept graphs
+and generated courses are available in
+`storage.py` (see `STORAGE.txt`), `documents.py` (see `DOCUMENTS.txt`),
+`graph.py` (see `GRAPH.txt`) and `orchestration.py` (see `ORCHESTRATION.txt`),
+which drives the nominal flow and delegates generation to the LLM.

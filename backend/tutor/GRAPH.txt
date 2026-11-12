@@ -1,0 +1,59 @@
+Concept graph proposal, validation and correction
+=================================================
+
+`backend/tutor/graph.py` represents a concept graph proposed for a learner and
+lets the learner verify and correct it. The backend does not invent the
+extraction: the agent reads the learner's documents, proposes concepts and
+prerequisite relations as structured data, and passes them to
+`ConceptGraphProposal.from_mapping` (or constructs the objects directly).
+
+Proposal
+--------
+- `Evidence(document_id, passage_id, quote=None)` cites the passage that
+  supports a concept or a relation.
+- `ProposedConcept(concept_id, label, description, target_level, weight,
+  evidence)`.
+- `ProposedEdge(prerequisite_id, concept_id, evidence)` means the prerequisite
+  must be sufficiently mastered before the concept.
+- `ConceptGraphProposal(graph_id, concepts, edges, source_document_ids, notes)`
+  is immutable; every correction returns a new proposal.
+
+Validation
+----------
+`proposal.validate(known_passages=None)` returns a `ValidationReport` with
+stable issue codes:
+
+- `empty_graph`, `duplicate_concept`, `duplicate_edge`;
+- `unknown_prerequisite`, `unknown_concept`, `self_loop`;
+- `cycle` (the graph must be a DAG);
+- `unknown_passage` when `known_passages` (an iterable of passage ids, or a
+  mapping keyed by them) is provided and evidence cites a passage that does not
+  exist.
+
+`proposal.to_domain_concepts()` converts a valid proposal into `domain.Concept`
+objects and raises `ValueError` listing the issues otherwise.
+`proposal.topological_order()` returns the prerequisite-safe order.
+
+Corrections
+-----------
+`add_concept`, `remove_concept` (also removes its edges), `add_edge`,
+`remove_edge`, `rename_concept`, `set_target_level`, `set_weight`. A correction
+that would break the model raises `ValueError` (unknown concept, duplicate, or
+edge endpoints not in the graph).
+
+Serialization and storage
+--------------------------
+`to_mapping()` / `from_mapping()` round-trip the proposal as JSON-compatible
+data, which is how the agent's output enters the backend. The mapping is
+strict: unknown keys are rejected. Proposals are persisted by
+`storage.SQLiteStore.save_graph` / `get_graph` / `list_graphs` /
+`set_graph_status`, with status `proposed`, `validated` or `corrected`.
+Saving a graph again replaces its content, so a corrected proposal is stored by
+reloading it, applying corrections, and saving it with status `corrected`.
+
+Limitations
+-----------
+- The extraction of concepts and relations from the documents is the agent's
+  job and is not implemented here; this module validates and corrects it.
+- Evidence is stored but not automatically checked against the documents at
+  save time; pass the learner's passage ids to `validate` to check grounding.

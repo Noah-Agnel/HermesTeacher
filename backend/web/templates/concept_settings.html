@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Configuration — {{ concept.title }}{% endblock %}
+{% block content %}
+<h1>Configuration — {{ concept.title }}</h1>
+
+{% if errors %}
+<div class="errors">
+  {% for error in errors %}<p>{{ error }}</p>{% endfor %}
+</div>
+{% endif %}
+
+<form method="post" action="/concepts/{{ concept.concept_id }}/settings" class="form">
+  <label>Titre
+    <input type="text" name="title" required value="{{ concept.title }}">
+  </label>
+
+  <label>Objectifs / consignes
+    <textarea name="objectives" rows="4">{{ concept.objectives }}</textarea>
+  </label>
+
+  <div class="form-row">
+    <label>Format préféré
+      <select name="format">
+        <option value="texte" {% if concept.preferences.get('format') == 'texte' %}selected{% endif %}>Texte</option>
+        <option value="exemples" {% if concept.preferences.get('format') == 'exemples' %}selected{% endif %}>Par l'exemple</option>
+        <option value="visuel" {% if concept.preferences.get('format') == 'visuel' %}selected{% endif %}>Visuel</option>
+        <option value="theorie" {% if concept.preferences.get('format') == 'theorie' %}selected{% endif %}>Théorie</option>
+      </select>
+    </label>
+    <label>Temps disponible (min/jour)
+      <input type="number" name="daily_minutes" min="0" value="{{ concept.preferences.get('daily_minutes', 20) }}">
+    </label>
+  </div>
+
+  <label>Points à privilégier
+    <input type="text" name="focus" value="{{ concept.preferences.get('focus', '') }}">
+  </label>
+
+  <label>Points de difficulté
+    <input type="text" name="difficulties" value="{{ concept.preferences.get('difficulties', '') }}">
+  </label>
+
+  <div class="form-row">
+    <label>Taux d'apprentissage (eta)
+      <input type="number" name="eta" step="0.05" min="0" max="1" value="{{ concept.eta }}">
+    </label>
+    <label>Seuil de maîtrise des prérequis (theta)
+      <input type="number" name="theta" step="0.05" min="0" max="1" value="{{ concept.theta }}">
+    </label>
+  </div>
+
+  <button class="btn btn-primary" type="submit">Enregistrer</button>
+  <a class="btn" href="/concepts/{{ concept.concept_id }}">Retour</a>
+</form>
+
+<form method="post" action="/concepts/{{ concept.concept_id }}/delete" class="danger-zone">
+  <p>Supprimer ce concept efface ses documents, son graphe et toute sa progression.</p>
+  <button class="btn btn-danger" type="submit">Supprimer ce concept</button>
+</form>
+{% endblock %}

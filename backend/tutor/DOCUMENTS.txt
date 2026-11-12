@@ -1,0 +1,40 @@
+Document processing
+===================
+
+`backend/tutor/documents.py` loads a learner's documents and splits them into
+ordered passages. Passages are the unit cited as evidence by a concept graph.
+
+Supported formats
+-----------------
+- plain text (.txt) and Markdown (.md, .markdown), read as UTF-8;
+- PDF (.pdf), read with pypdf (optional dependency: `pip install pypdf`).
+
+`load_file` dispatches on the extension; `load_text` and `load_pdf` can be
+called directly. Unknown extensions are rejected.
+
+Passages
+--------
+- Plain text is split on blank lines into paragraphs, then grouped into chunks
+  of at most `max_chars` (default 2000).
+- Markdown is split on headings; each section keeps its heading and is chunked
+  the same way when it is too long.
+- PDF creates one or more passages per non-empty page, each with a 1-based
+  `page` number. A PDF with no extractable text layer (a scan) is rejected with
+  a clear error; OCR is out of scope.
+
+Every passage has:
+- `passage_id`: `{document_id}:{ordinal:04d}`, stable for a given document;
+- `document_id` and `ordinal` (0-based, in reading order);
+- `text`;
+- `heading` (Markdown sections only) and `page` (PDF only) when applicable.
+
+Document
+--------
+`Document(document_id, title, source, media_type, passages, metadata)`.
+`title` defaults to the document id (or the file stem for `load_file`), `source`
+records the path or origin, and `metadata` is a free-form mapping.
+
+Storage
+-------
+`storage.SQLiteStore.save_document` / `get_document` / `list_documents`
+persist documents and their passages, scoped to a learner. See `STORAGE.txt`.

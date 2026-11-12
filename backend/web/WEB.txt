@@ -1,0 +1,55 @@
+Web interface
+=============
+
+`backend/web/` is the prototype interface. It is a FastAPI application with
+server-rendered Jinja2 templates. It does not decide levels, gaps, ordering or
+progress: it delegates every learning-path decision to the backend engine in
+`backend/tutor/orchestration.py` and renders the persisted state.
+
+Pages
+-----
+- `/` lists the concepts in progress with their phase and progress bar.
+- `/concepts/new` deposits the documents (PDF, Markdown, text), the objectives
+  and the preferences, then starts the learning path.
+- `/concepts/{id}` shows the progress bar, the concept graph and the current
+  activity: initial evaluation, next lesson, next exercise, final exam or
+  remediation.
+- `/concepts/{id}/settings` edits the title, objectives, preferences, eta and
+  theta of a concept.
+
+Storage
+-------
+Each concept is an independent learning path stored in its own SQLite database
+(`data/concepts/{concept_id}.sqlite3`), created by `backend.tutor.storage`.
+The registry that lists the concepts lives in `data/profile.sqlite3`
+(`backend/web/profile.py`). This keeps the existing backend unchanged while
+several concepts are learnt in parallel.
+
+Model boundary
+--------------
+`backend/web/generators.py` provides:
+
+- `DemoGenerator`, a deterministic stand-in that extracts a small concept
+  chain from the deposited documents and generates courses, exercises and
+  grades. It is used when no model is configured.
+- `OpenAICompleter`, which calls an OpenAI-compatible chat-completions
+  endpoint with the standard library. Set `TUTOR_LLM_BASE_URL`,
+  `TUTOR_LLM_API_KEY` and `TUTOR_LLM_MODEL`; the backend `PromptLLMGenerator`
+  builds the prompts.
+
+`TUTOR_DEMO=1` forces the demo generator, `TUTOR_DEMO=0` forces the API, and
+`TUTOR_DEMO=auto` (default) uses the demo when no API key is set.
+
+Running
+-------
+    pip install -r requirements.txt
+    python -m backend.web
+
+Then open http://127.0.0.1:8000.
+
+Verification
+------------
+`backend/tests/test_web.py` exercises the demo generator, the concept
+registry, the graph layout and the full HTTP flow: creating a concept,
+submitting the initial evaluation, generating a lesson and an exercise,
+submitting the exercise, the final exam and the remediation resume.

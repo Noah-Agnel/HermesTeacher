@@ -1,27 +1,234 @@
 from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import Enum
+from heapq import heappop, heappush
 from math import isfinite
 
 
-def update_level(current: float, result: float, eta: float, aided: bool = False) -> float:
-    """Update one mastery score, unless the attempt used help.
+DEFAULT_PREREQUISITE_THRESHOLD = 0.75
 
-    ``current`` is k, ``result`` is r, and ``eta`` controls how much the
-    latest result moves the score. All three numeric inputs use the [0, 1]
-    scale so the returned level stays on that same scale.
+
+class AttemptType(str, Enum):
+    """Kinds of scored attempts; categories currently share one update rule."""
+
+    EXERCISE = "exercise"
+    EVALUATION = "evaluation"
+    FINAL_EXAM = "final_exam"
+
+
+@dataclass(frozen=True)
+class Concept:
+    """A concept and its prerequisite edges and learning priorities."""
+
+    id: str
+    prerequisites: frozenset[str] = frozenset()
+    target_level: float = 1.0
+    weight: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("concept id must be a non-empty string")
+        prerequisites = frozenset(self.prerequisites)
+        if any(not isinstance(item, str) or not item.strip() for item in prerequisites):
+            raise ValueError("prerequisite ids must be non-empty strings")
+        object.__setattr__(self, "prerequisites", prerequisites)
+        if not 0 <= self.target_level <= 1:
+            raise ValueError("target_level must be between 0 and 1")
+        if self.weight < 0 or not isfinite(self.weight):
+            raise ValueError("weight must be finite and non-negative")
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """A scored response with its category and assistance assessment."""
+
+    kind: AttemptType
+    score: float
+    assistance_coefficient: float = 1.0
+    difficulty_coefficient: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, AttemptType):
+            raise ValueError("kind must be an AttemptType")
+        for name, value in (
+            ("score", self.score),
+            ("assistance_coefficient", self.assistance_coefficient),
+            ("difficulty_coefficient", self.difficulty_coefficient),
+        ):
+            if not 0 <= value <= 1:
+                raise ValueError(f"{name} must be between 0 and 1")
+
+
+def topological_order(concepts: Mapping[str, Concept]) -> tuple[str, ...]:
+    """Validate a concept graph and return a deterministic topological order."""
+    for concept_id, concept in concepts.items():
+        if not isinstance(concept, Concept):
+            raise ValueError(f"concepts[{concept_id!r}] must be a Concept")
+        if concept_id != concept.id:
+            raise ValueError("each concept mapping key must match its concept id")
+        for prerequisite in concept.prerequisites:
+            if prerequisite not in concepts:
+                raise ValueError(
+                    f"concept {concept_id!r} has unknown prerequisite {prerequisite!r}"
+                )
+
+    indegree = {concept_id: len(concept.prerequisites) for concept_id, concept in concepts.items()}
+    children = {concept_id: [] for concept_id in concepts}
+    for concept_id, concept in concepts.items():
+        for prerequisite in concept.prerequisites:
+            children[prerequisite].append(concept_id)
+
+    ready = []
+    for concept_id, degree in indegree.items():
+        if degree == 0:
+            heappush(ready, concept_id)
+
+    ordered = []
+    while ready:
+        concept_id = heappop(ready)
+        ordered.append(concept_id)
+        for child in sorted(children[concept_id]):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                heappush(ready, child)
+
+    if len(ordered) != len(concepts):
+        remaining = sorted(set(concepts) - set(ordered))
+        raise ValueError(f"concept graph is cyclic; unresolved concepts: {remaining!r}")
+    return tuple(ordered)
+
+
+def plan_concepts(
+    concepts: Mapping[str, Concept],
+    current_levels: Mapping[str, float],
+    prerequisite_threshold: float = DEFAULT_PREREQUISITE_THRESHOLD,
+) -> tuple[str, ...]:
+    """Return concepts to work on in prerequisite-safe priority order.
+
+    Concepts below target are included. Any prerequisite below the required
+    threshold is added even when it is already at its own target. Among the
+    currently available concepts, higher weight wins, then larger shortfall,
+    then lexicographically smaller id for deterministic ties.
     """
-    # Validate every score and the learning rate before doing any arithmetic.
-    # The range check also rejects NaN, because NaN is not between 0 and 1.
-    for name, value in (("current", current), ("result", result), ("eta", eta)):
+    topological_order(concepts)
+    if current_levels.keys() != concepts.keys():
+        raise ValueError("current_levels must contain exactly the concept ids")
+    if not 0 <= prerequisite_threshold <= 1:
+        raise ValueError("prerequisite_threshold must be between 0 and 1")
+    for concept_id, level in current_levels.items():
+        if not 0 <= level <= 1:
+            raise ValueError(f"current_levels[{concept_id!r}] must be between 0 and 1")
+
+    selected = {
+        concept_id
+        for concept_id, concept in concepts.items()
+        if concept.target_level > current_levels[concept_id]
+    }
+    required_prerequisites = set()
+    visited = set()
+    pending = list(sorted(selected))
+
+    while pending:
+        concept_id = pending.pop()
+        if concept_id in visited:
+            continue
+        visited.add(concept_id)
+        for prerequisite in concepts[concept_id].prerequisites:
+            if current_levels[prerequisite] < prerequisite_threshold:
+                required_prerequisites.add(prerequisite)
+                selected.add(prerequisite)
+                if prerequisite not in visited:
+                    pending.append(prerequisite)
+
+    if not selected:
+        return ()
+
+    priority_gaps = {}
+    for concept_id in selected:
+        concept = concepts[concept_id]
+        target_shortfall = max(concept.target_level - current_levels[concept_id], 0.0)
+        threshold_shortfall = (
+            max(prerequisite_threshold - current_levels[concept_id], 0.0)
+            if concept_id in required_prerequisites
+            else 0.0
+        )
+        priority_gaps[concept_id] = max(target_shortfall, threshold_shortfall)
+
+    indegree = {
+        concept_id: sum(
+            prerequisite in selected
+            for prerequisite in concepts[concept_id].prerequisites
+        )
+        for concept_id in selected
+    }
+    children = {concept_id: [] for concept_id in selected}
+    for concept_id in selected:
+        for prerequisite in concepts[concept_id].prerequisites:
+            if prerequisite in selected:
+                children[prerequisite].append(concept_id)
+
+    ready = []
+    for concept_id, degree in indegree.items():
+        if degree == 0:
+            heappush(
+                ready,
+                (-concepts[concept_id].weight, -priority_gaps[concept_id], concept_id),
+            )
+
+    ordered = []
+    while ready:
+        _, _, concept_id = heappop(ready)
+        ordered.append(concept_id)
+        for child in sorted(children[concept_id]):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                heappush(
+                    ready,
+                    (-concepts[child].weight, -priority_gaps[child], child),
+                )
+
+    return tuple(ordered)
+
+
+def update_level(
+    current: float,
+    result: float,
+    eta: float,
+    assistance_coefficient: float = 1.0,
+    difficulty_coefficient: float = 1.0,
+) -> float:
+    """Update mastery, scaling the learning rate for help and difficulty.
+
+    ``current`` is k, ``result`` is r, and ``eta`` is the base learning rate.
+    Both coefficients are in [0, 1]. A help coefficient of 0 produces no
+    mastery update; a larger difficulty coefficient gives the scored exercise
+    more influence. Neither coefficient changes the raw result score.
+    """
+    for name, value in (
+        ("current", current),
+        ("result", result),
+        ("eta", eta),
+        ("assistance_coefficient", assistance_coefficient),
+        ("difficulty_coefficient", difficulty_coefficient),
+    ):
         if not 0 <= value <= 1:
             raise ValueError(f"{name} must be between 0 and 1")
 
-    # An assisted answer is not evidence of independent mastery. Keep k intact.
-    if aided:
-        return current
+    effective_eta = eta * assistance_coefficient * difficulty_coefficient
+    return current + effective_eta * (result - current)
 
-    # Move a fraction eta of the distance from the old level to the result.
-    # eta=0 leaves the score unchanged; eta=1 adopts the result completely.
-    return current + eta * (result - current)
+
+def update_level_from_attempt(current: float, attempt: Attempt, eta: float) -> float:
+    """Apply the same level-update rule to any recorded attempt category."""
+    if not isinstance(attempt, Attempt):
+        raise ValueError("attempt must be an Attempt")
+    return update_level(
+        current,
+        attempt.score,
+        eta,
+        assistance_coefficient=attempt.assistance_coefficient,
+        difficulty_coefficient=attempt.difficulty_coefficient,
+    )
 
 
 def weighted_gap(
@@ -29,10 +236,11 @@ def weighted_gap(
     target: Mapping[str, float],
     weights: Mapping[str, float] | None = None,
 ) -> float:
-    """Return the weighted mean positive shortfall from target levels.
+    """Return the sum of weighted positive shortfalls from target levels.
 
     Current and target maps must describe the same concepts. If weights are
-    omitted, every concept has equal weight. The result is in [0, 1].
+    omitted, every concept has equal weight. The result is non-negative and
+    may exceed 1 because the shortfalls are summed rather than averaged.
     """
     # Matching keys ensure every current score has exactly one target score.
     if current.keys() != target.keys():
@@ -52,39 +260,36 @@ def weighted_gap(
     elif weights.keys() != concepts:
         raise ValueError("weights must contain exactly the same concepts")
 
-    # Weights may be any finite, non-negative numbers; their scale cancels in
-    # the weighted mean, so they do not need to sum to one.
+    # Weights may be any finite, non-negative numbers.
     for concept, weight in weights.items():
         if weight < 0 or not isfinite(weight):
             raise ValueError(f"weights[{concept!r}] must be finite and non-negative")
 
-    # If all weights are zero, there is no weighted shortfall to report.
-    total_weight = sum(weights.values())
-    if total_weight == 0:
+    # A zero weight sum contributes no gap.
+    if sum(weights.values()) == 0:
         return 0.0
 
-    # Positive differences are unmet targets. max(..., 0) gives zero to any
-    # concept already at or above target; its weight remains in the overall
-    # mean denominator so fully met concepts contribute no shortfall.
-    return (
-        sum(
-            weights[concept] * max(target[concept] - current[concept], 0.0)
-            for concept in concepts
-        )
-        / total_weight
+    # Sum the weighted positive shortfalls exactly as defined in the spec.
+    gap = sum(
+        weights[concept] * max(target[concept] - current[concept], 0.0)
+        for concept in concepts
     )
+    if not isfinite(gap):
+        raise ValueError("weighted gap must be finite")
+    return gap
 
 
 def progression(initial_gap: float, current_gap: float) -> float:
-    """Return the clamped fraction of the initial gap that has been closed.
+    """Return the clamped fraction of an arbitrary non-negative initial gap closed.
 
-    An initial gap of zero is treated as complete (1.0) if the current gap is
-    also zero; if a gap appears later, progression is 0.0.
+    Gaps need not be in [0, 1]: a weighted sum of concept shortfalls can
+    exceed 1. An initial gap of zero is treated as complete (1.0) if the
+    current gap is also zero; if a gap appears later, progression is 0.0.
     """
-    # Gaps are normalized scores, so both must be in the same [0, 1] range.
+    # Weighted sums are not normalized, but gaps must remain finite and >= 0.
     for name, value in (("initial_gap", initial_gap), ("current_gap", current_gap)):
-        if not 0 <= value <= 1:
-            raise ValueError(f"{name} must be between 0 and 1")
+        if value < 0 or not isfinite(value):
+            raise ValueError(f"{name} must be finite and non-negative")
 
     # Avoid dividing by zero: no initial gap means nothing was left to close.
     if initial_gap == 0:
