@@ -1,142 +1,228 @@
 {% extends "base.html" %}
+{% from "_macros.html" import constellation, answer_box %}
 {% block title %}{{ concept.title }} — HermesTeacher{% endblock %}
 {% block content %}
-<div class="page-header">
-  <div>
+{% set drafts = drafts if drafts is defined and drafts else {} %}
+{% set cid = concept.concept_id %}
+{% set ns = namespace(mastered=0) %}
+{% if concept.graph %}{% for item in concept.graph.concepts %}{% if concept.levels.get(item.concept_id, 0) >= item.target_level %}{% set ns.mastered = ns.mastered + 1 %}{% endif %}{% endfor %}{% endif %}
+
+<a class="back-link" href="/">concepts</a>
+<div class="page-head">
+  <div class="title-line">
     <h1>{{ concept.title }}</h1>
-    <span class="badge badge-{{ concept.phase }}">{{ phase_label(concept.phase) }}</span>
+    <span class="chip chip-{{ concept.phase }}">{{ phase_label(concept.phase) }}</span>
   </div>
   <div class="actions">
-    <a class="btn" href="/concepts/{{ concept.concept_id }}/settings">Configuration</a>
+    {% if concept.graph %}<a class="btn" href="/concepts/{{ cid }}/graph">Voir le graphe</a>{% endif %}
+    <a class="btn btn-quiet" href="/concepts/{{ cid }}/settings">Configuration</a>
   </div>
 </div>
 
 {% if error %}
-<div class="errors"><p>{{ error }}</p></div>
+<div class="errors" role="alert"><p>{{ error }}</p></div>
 {% endif %}
 
-<section class="panel">
-  <h2>Progression</h2>
-  <div class="progress progress-large">
-    <div class="progress-bar" style="width: {{ (concept.progress * 100)|round }}%"></div>
-  </div>
-  <p class="muted">
-    {{ (concept.progress * 100)|round }} % · écart actuel {{ "%.2f"|format(concept.current_gap) }}
-    {% if concept.initial_gap is not none %}· écart initial {{ "%.2f"|format(concept.initial_gap) }}{% else %}· écart initial non calculé{% endif %}
-  </p>
-</section>
-
-{% if graph_layout %}
-<section class="panel">
-  <h2>Graphe des sous-concepts</h2>
-  <div class="graph-scroll">
-    <svg viewBox="0 0 {{ graph_layout.width }} {{ graph_layout.height }}" class="graph" role="img" aria-label="Graphe des sous-concepts">
-      <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#90a4ae"></path>
-        </marker>
-      </defs>
-      {% for edge in graph_layout.edges %}
-      <line x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}" class="edge" marker-end="url(#arrow)"></line>
-      {% endfor %}
-      {% for node in graph_layout.nodes %}
-      <g class="node" data-concept-id="{{ node.concept_id }}">
-        <rect x="{{ node.x - 60 }}" y="{{ node.y - 25 }}" width="120" height="50" rx="10" fill="{{ node.color }}"></rect>
-        <text x="{{ node.x }}" y="{{ node.y - 4 }}" class="node-label">{{ node.label }}</text>
-        <text x="{{ node.x }}" y="{{ node.y + 14 }}" class="node-level">{{ node.percent }}%</text>
-      </g>
-      {% endfor %}
-    </svg>
-  </div>
-  <p class="hint">Les nœuds seront cliquables prochainement pour réviser un sous-concept.</p>
-</section>
-{% endif %}
-
-<section class="panel">
-  <h2>Activité</h2>
+<div class="study">
+  <section class="stage" aria-label="Activité en cours">
 
   {% if activity.kind == "not_started" %}
-    <p>Ce concept n'a pas encore démarré.</p>
+    <div class="panel cta-card">
+      <h2>Rien à faire pour l'instant</h2>
+      <p class="stage-intro">Ce concept n'a pas encore démarré.</p>
+    </div>
+
+  {% elif activity.kind == "evaluation_pending" %}
+    <div class="panel cta-card">
+      <h2>Le graphe est prêt</h2>
+      <p class="stage-intro">Il reste à générer l'évaluation de départ : une dizaine de questions générales pour situer votre niveau.</p>
+      <form method="post" action="/concepts/{{ cid }}/evaluation/generate"
+            data-job="/api/concepts/{{ cid }}/evaluation/generate" data-job-title="Évaluation de départ">
+        <div class="stage-actions">
+          <button class="btn btn-primary" type="submit">Générer l'évaluation initiale</button>
+          <span class="hint">La génération peut prendre plusieurs minutes.</span>
+        </div>
+      </form>
+    </div>
 
   {% elif activity.kind == "evaluation" %}
-    <p>Répondez à l'évaluation initiale pour que le tuteur estime votre niveau.</p>
-    <form method="post" action="/concepts/{{ concept.concept_id }}/evaluation" class="form">
-      {% for question in activity.questions %}
-      <div class="question">
-        <p class="question-prompt">{{ question.prompt }}</p>
-        <textarea name="response-{{ question.question_id }}" rows="3"></textarea>
-      </div>
-      {% endfor %}
-      <button class="btn btn-primary" type="submit">Valider l'évaluation initiale</button>
-    </form>
+    <div class="panel">
+      <h2>Évaluation de départ</h2>
+      <p class="stage-intro">Répondez simplement, sans chercher dans le cours. Cochez « Je ne sais pas » plutôt que de deviner : cela situe votre niveau plus justement.</p>
+      <form method="post" action="/concepts/{{ cid }}/evaluation"
+            data-job="/api/concepts/{{ cid }}/evaluation" data-job-title="Correction de l'évaluation">
+        <ol class="question-list">
+          {% for question in activity.questions %}
+          <li class="question">
+            <div class="question-prompt prose prose-tight" data-md>{{ question.prompt }}</div>
+            {{ answer_box('response-' ~ question.question_id, drafts.get('response-' ~ question.question_id, ''), 'dontknow-' ~ question.question_id, drafts.get('dontknow-' ~ question.question_id), 3) }}
+          </li>
+          {% endfor %}
+        </ol>
+        <div class="stage-actions">
+          <button class="btn btn-primary" type="submit">Valider l'évaluation initiale</button>
+          <span class="hint">{{ activity.questions|length }} questions</span>
+        </div>
+      </form>
+    </div>
 
   {% elif activity.kind == "idle" %}
     {% if concept.remaining %}
-    <form method="post" action="/concepts/{{ concept.concept_id }}/lesson">
-      <button class="btn btn-primary" type="submit">Next lesson</button>
-    </form>
-    <p class="muted">Prochains concepts : {{ remaining_labels|join(', ') }}</p>
+    <div class="panel cta-card">
+      <h2>{{ remaining_labels[0] }}</h2>
+      <p class="stage-intro">Prochain sous-concept à travailler. Le tuteur écrit un mini-cours à partir de vos documents, puis un exercice.</p>
+      <form method="post" action="/concepts/{{ cid }}/lesson"
+            data-job="/api/concepts/{{ cid }}/lesson" data-job-title="Préparation de la leçon">
+        <div class="stage-actions">
+          <button class="btn btn-primary" type="submit">Commencer la leçon</button>
+        </div>
+      </form>
+    </div>
     {% else %}
-    <p>Tous les concepts sont couverts.</p>
-    <form method="post" action="/concepts/{{ concept.concept_id }}/final-exam">
-      <button class="btn btn-primary" type="submit">Passer l'examen final</button>
-    </form>
+    <div class="panel cta-card">
+      <h2>Tous les sous-concepts sont couverts</h2>
+      <p class="stage-intro">L'examen final vérifie l'ensemble du concept, sans aide.</p>
+      <form method="post" action="/concepts/{{ cid }}/final-exam"
+            data-job="/api/concepts/{{ cid }}/final-exam" data-job-title="Préparation de l'examen final">
+        <div class="stage-actions">
+          <button class="btn btn-primary" type="submit">Passer l'examen final</button>
+        </div>
+      </form>
+    </div>
     {% endif %}
 
   {% elif activity.kind == "lesson" %}
     {% if activity.course %}
-    <article class="course">
-      <h3>{{ activity.course.title }}</h3>
-      <p>{{ activity.course.content }}</p>
+    <article class="panel lesson">
+      <header class="lesson-head">
+        <h2>{{ activity.course.title }}</h2>
+      </header>
+      <nav class="outline" data-outline aria-label="Plan du cours"></nav>
+      <div class="prose" data-md data-outline-source>{{ activity.course.content }}</div>
     </article>
     {% endif %}
-    <form method="post" action="/concepts/{{ concept.concept_id }}/exercise">
-      <button class="btn btn-primary" type="submit">Next exercice</button>
-    </form>
+    <div class="stage-actions">
+      <form method="post" action="/concepts/{{ cid }}/exercise"
+            data-job="/api/concepts/{{ cid }}/exercise" data-job-title="Préparation de l'exercice">
+        <button class="btn btn-primary" type="submit">Passer à l'exercice</button>
+      </form>
+      {% if activity.course and not activity.course.saved %}
+      <form method="post" action="/concepts/{{ cid }}/course/save">
+        <input type="hidden" name="course_id" value="{{ activity.course.course_id }}">
+        <button class="btn" type="submit">Sauvegarder ce cours</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if activity.course and not activity.course.saved %}
+    <p class="hint">Sans sauvegarde, le cours est supprimé quand vous passez à l'exercice.</p>
+    {% elif activity.course %}
+    <p class="hint">Cours sauvegardé : vous pourrez y revenir.</p>
+    {% endif %}
 
   {% elif activity.kind == "exercise" %}
     {% if activity.question %}
-    <form method="post" action="/concepts/{{ concept.concept_id }}/exercise/submit" class="form">
-      <p class="question-prompt">{{ activity.question.prompt }}</p>
-      <textarea name="response_text" rows="4"></textarea>
-      <button class="btn btn-primary" type="submit">Valider l'exercice</button>
-    </form>
+    <div class="panel">
+      <h2>Exercice</h2>
+      <form method="post" action="/concepts/{{ cid }}/exercise/submit"
+            data-job="/api/concepts/{{ cid }}/exercise/submit" data-job-title="Correction de l'exercice">
+        <div class="question single">
+          <div class="question-prompt prose" data-md>{{ activity.question.prompt }}</div>
+          {{ answer_box('response_text', drafts.get('response_text', ''), 'dont_know', drafts.get('dont_know'), 7) }}
+        </div>
+        <div class="stage-actions">
+          <button class="btn btn-primary" type="submit">Valider l'exercice</button>
+        </div>
+      </form>
+    </div>
     {% else %}
-    <p>Aucun exercice en cours.</p>
+    <div class="panel cta-card"><p>Aucun exercice en cours.</p></div>
     {% endif %}
 
   {% elif activity.kind == "final_exam" %}
-    <p>Examen final : répondez à toutes les questions.</p>
-    <form method="post" action="/concepts/{{ concept.concept_id }}/final-exam/submit" class="form">
-      {% for question in activity.questions %}
-      <div class="question">
-        <p class="question-prompt">{{ question.prompt }}</p>
-        <textarea name="response-{{ question.question_id }}" rows="3"></textarea>
-      </div>
-      {% endfor %}
-      <button class="btn btn-primary" type="submit">Valider l'examen final</button>
-    </form>
+    <div class="panel">
+      <h2>Examen final</h2>
+      <p class="stage-intro">Répondez à toutes les questions, sans le cours. Cochez « Je ne sais pas » si besoin.</p>
+      <form method="post" action="/concepts/{{ cid }}/final-exam/submit"
+            data-job="/api/concepts/{{ cid }}/final-exam/submit" data-job-title="Correction de l'examen final">
+        <ol class="question-list">
+          {% for question in activity.questions %}
+          <li class="question">
+            <div class="question-prompt prose prose-tight" data-md>{{ question.prompt }}</div>
+            {{ answer_box('response-' ~ question.question_id, drafts.get('response-' ~ question.question_id, ''), 'dontknow-' ~ question.question_id, drafts.get('dontknow-' ~ question.question_id), 3) }}
+          </li>
+          {% endfor %}
+        </ol>
+        <div class="stage-actions">
+          <button class="btn btn-primary" type="submit">Valider l'examen final</button>
+        </div>
+      </form>
+    </div>
 
   {% elif activity.kind == "completed" %}
-    <p>Parcours terminé.</p>
-    {% if concept.sufficient %}
-      <p class="success">Niveau suffisant sur tous les concepts.</p>
-    {% else %}
-      <p class="warning">Niveau insuffisant : une remédiation est proposée.</p>
-      {% if concept.remaining %}
-      <p>Concepts à revoir : {{ remaining_labels|join(', ') }}</p>
+    <div class="panel cta-card">
+      <h2>Parcours terminé</h2>
+      {% if concept.sufficient %}
+        <p class="success">Niveau suffisant sur tous les sous-concepts.</p>
+      {% else %}
+        <p class="warning">Certains sous-concepts restent sous l'objectif : une remédiation est proposée.</p>
+        {% if concept.remaining %}<p class="stage-intro">À revoir : {{ remaining_labels|join(', ') }}</p>{% endif %}
+        <form method="post" action="/concepts/{{ cid }}/resume">
+          <div class="stage-actions"><button class="btn btn-primary" type="submit">Reprendre l'apprentissage</button></div>
+        </form>
       {% endif %}
-      <form method="post" action="/concepts/{{ concept.concept_id }}/resume">
-        <button class="btn btn-primary" type="submit">Reprendre l'apprentissage</button>
-      </form>
-    {% endif %}
-    {% if concept.graph %}
-    <ul class="levels">
-      {% for item in concept.graph.concepts %}
-      <li>{{ item.label }} — {{ (concept.levels.get(item.concept_id, 0) * 100)|round }} %</li>
-      {% endfor %}
-    </ul>
-    {% endif %}
+      {% if concept.graph %}
+      <ul class="levels">
+        {% for item in concept.graph.concepts %}
+        {% set pct = (concept.levels.get(item.concept_id, 0) * 100)|round|int %}
+        <li><span>{{ item.label }}</span><span class="bar"><span style="width: {{ pct }}%"></span></span><span class="pct">{{ pct }} %</span></li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
   {% endif %}
-</section>
+  </section>
+
+  <aside class="rail" aria-label="Progression">
+    <div class="panel">
+      {% set pct = (concept.progress * 100)|round|int %}
+      <div class="ring">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <defs>
+            <linearGradient id="ring-gradient" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#3a73e0"/><stop offset="1" stop-color="#86efff"/>
+            </linearGradient>
+          </defs>
+          <circle class="track" cx="50" cy="50" r="42" fill="none" stroke-width="8"/>
+          <circle class="value" cx="50" cy="50" r="42" fill="none" stroke-width="8" stroke="url(#ring-gradient)"
+                  stroke-dasharray="263.9" stroke-dashoffset="{{ 263.9 * (1 - concept.progress) }}"/>
+        </svg>
+        <div>
+          <div class="ring-figure">{{ pct }} %</div>
+          <div class="ring-caption">de l'écart initial comblé</div>
+          {% if concept.graph %}<div class="ring-caption">{{ ns.mastered }} / {{ concept.concept_count }} sous-concepts maîtrisés</div>{% endif %}
+        </div>
+      </div>
+    </div>
+
+    {% if concept.mini_graph %}
+    <div class="panel">
+      <h3>Carte du concept</h3>
+      <a class="rail-sky" href="/concepts/{{ cid }}/graph" aria-label="Ouvrir le graphe">
+        {{ constellation(concept.mini_graph, "Graphe du concept") }}
+      </a>
+      <a class="btn" href="/concepts/{{ cid }}/graph">Voir le graphe</a>
+    </div>
+    {% endif %}
+
+    {% if remaining_labels %}
+    <div class="panel">
+      <h3>À venir</h3>
+      <ul class="next-list">
+        {% for label in remaining_labels[:5] %}<li>{{ label }}</li>{% endfor %}
+      </ul>
+      {% if remaining_labels|length > 5 %}<p class="hint">et {{ remaining_labels|length - 5 }} autres</p>{% endif %}
+    </div>
+    {% endif %}
+  </aside>
+</div>
 {% endblock %}

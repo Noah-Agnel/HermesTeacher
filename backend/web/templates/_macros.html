@@ -1,0 +1,23 @@
+{# Shared constellation drawing: concepts as points of light. #}
+{% macro constellation(mini, label) -%}
+{% if mini %}
+<svg class="constellation" viewBox="0 0 100 60" role="img" aria-label="{{ label }}">
+  {% for edge in mini.edges %}<line x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"></line>{% endfor %}
+  {% for node in mini.nodes %}<circle class="m{{ node.bucket }}" cx="{{ node.x }}" cy="{{ node.y }}" r="{{ 2.6 if mini.nodes|length < 12 else 2.1 }}"><title>{{ node.label }}</title></circle>{% endfor %}
+</svg>
+{%- endif %}
+{%- endmacro %}
+
+{% macro answer_box(name, value, dont_know_name, dont_know_checked, rows=4) -%}
+<div class="answer">
+  <textarea name="{{ name }}" rows="{{ rows }}" data-preview placeholder="Votre réponse… (formules : $x^2$, $\frac{1}{2}$)">{{ value }}</textarea>
+  <div class="preview prose prose-tight" aria-live="polite"></div>
+  <div class="answer-tools">
+    <label class="dont-know">
+      <input type="checkbox" name="{{ dont_know_name }}" {% if dont_know_checked %}checked{% endif %}>
+      Je ne sais pas
+    </label>
+    <span class="math-hint">LaTeX entre $…$ : aperçu en direct</span>
+  </div>
+</div>
+{%- endmacro %}

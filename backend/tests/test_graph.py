@@ -126,34 +126,34 @@ class ProposalValidationTests(unittest.TestCase):
         self.assertFalse(report.is_valid)
         self.assertIn("duplicate_edge", [issue.code for issue in report.issues])
 
-    def test_unknown_passage_is_reported_when_known_passages_given(self):
+    def test_unknown_document_is_reported_when_known_documents_given(self):
         proposal = make_proposal(
             concepts=[
                 graph.ProposedConcept(
                     "a",
                     "A",
-                    evidence=(graph.Evidence("doc-1", "passage-99"),),
+                    evidence=(graph.Evidence("doc-1", page=1),),
                 )
             ]
         )
 
-        report = proposal.validate(known_passages={"doc-1:0000"})
+        report = proposal.validate(known_documents={"doc-2"})
 
         self.assertFalse(report.is_valid)
-        self.assertIn("unknown_passage", [issue.code for issue in report.issues])
+        self.assertIn("unknown_document", [issue.code for issue in report.issues])
 
-    def test_known_passage_produces_no_issue(self):
+    def test_known_document_produces_no_issue(self):
         proposal = make_proposal(
             concepts=[
                 graph.ProposedConcept(
                     "a",
                     "A",
-                    evidence=(graph.Evidence("doc-1", "doc-1:0000"),),
+                    evidence=(graph.Evidence("doc-1", page=1),),
                 )
             ]
         )
 
-        report = proposal.validate(known_passages={"doc-1:0000"})
+        report = proposal.validate(known_documents={"doc-1"})
 
         self.assertTrue(report.is_valid)
 
@@ -291,11 +291,11 @@ class SerializationTests(unittest.TestCase):
                     description="Description",
                     target_level=0.8,
                     weight=2.0,
-                    evidence=(graph.Evidence("doc-1", "doc-1:0000", "quote"),),
+                    evidence=(graph.Evidence("doc-1", page=1, quote="quote"),),
                 ),
                 graph.ProposedConcept("b", "B"),
             ],
-            edges=[graph.ProposedEdge("a", "b", evidence=(graph.Evidence("doc-1", "doc-1:0000"),))],
+            edges=[graph.ProposedEdge("a", "b", evidence=(graph.Evidence("doc-1", page=1),))],
             source_document_ids=["doc-1"],
             notes="proposé",
         )

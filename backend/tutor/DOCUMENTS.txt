@@ -1,40 +1,46 @@
-Document processing
-===================
+Deposited document storage
+==========================
 
-`backend/tutor/documents.py` loads a learner's documents and splits them into
-ordered passages. Passages are the unit cited as evidence by a concept graph.
+`backend/tutor/documents.py` stores the learner's deposited files as-is and
+records their location. It also converts each PDF once, at upload, into a text
+companion (`{document_id}.txt` next to the PDF). It does not split the content
+into passages or index it.
 
 Supported formats
 -----------------
-- plain text (.txt) and Markdown (.md, .markdown), read as UTF-8;
-- PDF (.pdf), read with pypdf (optional dependency: `pip install pypdf`).
-
-`load_file` dispatches on the extension; `load_text` and `load_pdf` can be
-called directly. Unknown extensions are rejected.
-
-Passages
---------
-- Plain text is split on blank lines into paragraphs, then grouped into chunks
-  of at most `max_chars` (default 2000).
-- Markdown is split on headings; each section keeps its heading and is chunked
-  the same way when it is too long.
-- PDF creates one or more passages per non-empty page, each with a 1-based
-  `page` number. A PDF with no extractable text layer (a scan) is rejected with
-  a clear error; OCR is out of scope.
-
-Every passage has:
-- `passage_id`: `{document_id}:{ordinal:04d}`, stable for a given document;
-- `document_id` and `ordinal` (0-based, in reading order);
-- `text`;
-- `heading` (Markdown sections only) and `page` (PDF only) when applicable.
-
-Document
---------
-`Document(document_id, title, source, media_type, passages, metadata)`.
-`title` defaults to the document id (or the file stem for `load_file`), `source`
-records the path or origin, and `metadata` is a free-form mapping.
+Only PDF is supported for now (`.pdf`, `application/pdf`).
 
 Storage
 -------
+`store_upload(upload_dir, document_id=..., title=..., filename=..., content=...)`
+writes the bytes to `upload_dir/{document_id}.pdf` and returns a `Document`
+record:
+
+- `document_id`: stable identifier of the deposit;
+- `title`: display title (the file stem by default);
+- `path`: path of the stored file;
+- `media_type`: `application/pdf`;
+- `metadata`: free-form mapping.
+
+The file is never modified. The agent cites the document by id with an
+optional page and a short quote.
+
+Text conversion
+---------------
+`ensure_text(pdf_path)` writes `{document_id}.txt` (PyMuPDF), one
+`=== Page N ===` marker per page. LaTeX math is kept readable: big operators
+drawn with the `cmex` font are mapped back to ∑ ∫ ⋂ ∏ ..., blackboard letters
+to ℝ ℕ ℙ ..., LaTeX accents are composed (`´e` → `é`) and sub/superscripts are
+written `X_{n}` / `x^{2}`. Fractions and operator limits stay on separate
+lines, as in the PDF layout. A conversion failure never blocks the upload.
+`read_text(pdf_path)` returns the text, converting older uploads on demand.
+
+The web generators inline this text in the prompts (`<document>` tags), so
+the agent answers in one call instead of reading the PDF with dozens of tool
+calls. Above `TUTOR_INLINE_CHARS` characters (default 200 000) the prompt
+lists the `.txt` paths for the agent to read with `read_file`.
+
+Persistence
+-----------
 `storage.SQLiteStore.save_document` / `get_document` / `list_documents`
-persist documents and their passages, scoped to a learner. See `STORAGE.txt`.
+record the metadata, scoped to a learner. See `STORAGE.txt`.

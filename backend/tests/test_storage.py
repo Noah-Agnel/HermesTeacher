@@ -258,6 +258,7 @@ class DocumentStorageTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temporary_directory.name) / "learner.sqlite3"
+        self.upload_dir = Path(self.temporary_directory.name) / "uploads"
         self.assertIsNotNone(documents, "documents module should be implemented")
 
     def tearDown(self):
@@ -268,15 +269,19 @@ class DocumentStorageTests(unittest.TestCase):
         self.assertIsNotNone(store_type, "SQLiteStore should be implemented")
         return store_type(self.database_path)
 
-    def test_document_and_passages_survive_reopening(self):
+    def make_document(self, document_id="doc-1", title="Cours"):
+        return documents.store_upload(
+            self.upload_dir,
+            document_id=document_id,
+            title=title,
+            filename=f"{document_id}.pdf",
+            content=b"%PDF-1.4 fake",
+        )
+
+    def test_document_metadata_survives_reopening(self):
         store = self.make_store()
         store.create_learner("student-1")
-        document = documents.load_text(
-            "# Titre\n\nContenu du passage.",
-            document_id="doc-1",
-            title="Cours",
-            media_type="text/markdown",
-        )
+        document = self.make_document()
 
         store.save_document("student-1", document)
         reopened_store = self.make_store()
@@ -284,57 +289,39 @@ class DocumentStorageTests(unittest.TestCase):
 
         self.assertIsNotNone(fetched)
         self.assertEqual(fetched["title"], "Cours")
-        self.assertEqual(fetched["media_type"], "text/markdown")
-        self.assertEqual(len(fetched["passages"]), 1)
-        self.assertEqual(fetched["passages"][0]["passage_id"], "doc-1:0000")
-        self.assertEqual(fetched["passages"][0]["heading"], "Titre")
+        self.assertEqual(fetched["media_type"], "application/pdf")
+        self.assertEqual(fetched["path"], document.path)
 
-    def test_list_documents_reports_passage_counts(self):
+    def test_list_documents_returns_every_deposited_file(self):
         store = self.make_store()
         store.create_learner("student-1")
-        store.save_document(
-            "student-1",
-            documents.load_text("A.\n\nB.", document_id="doc-1", title="A"),
-        )
-        store.save_document(
-            "student-1",
-            documents.load_text("C.", document_id="doc-2", title="B"),
-        )
+        store.save_document("student-1", self.make_document("doc-1", "A"))
+        store.save_document("student-1", self.make_document("doc-2", "B"))
 
         listed = store.list_documents("student-1")
 
         self.assertEqual(
-            {item["document_id"]: item["passage_count"] for item in listed},
-            {"doc-1": 2, "doc-2": 1},
+            {item["document_id"]: item["title"] for item in listed},
+            {"doc-1": "A", "doc-2": "B"},
         )
 
     def test_get_document_is_scoped_to_the_learner(self):
         store = self.make_store()
         store.create_learner("student-1")
         store.create_learner("student-2")
-        store.save_document(
-            "student-1",
-            documents.load_text("A.", document_id="doc-1", title="A"),
-        )
+        store.save_document("student-1", self.make_document("doc-1", "A"))
 
         self.assertIsNone(store.get_document("student-2", "doc-1"))
 
     def test_saving_a_document_again_replaces_it(self):
         store = self.make_store()
         store.create_learner("student-1")
-        store.save_document(
-            "student-1",
-            documents.load_text("A.\n\nB.", document_id="doc-1", title="A"),
-        )
-        store.save_document(
-            "student-1",
-            documents.load_text("C.", document_id="doc-1", title="A"),
-        )
+        store.save_document("student-1", self.make_document("doc-1", "A"))
+        store.save_document("student-1", self.make_document("doc-1", "A mis à jour"))
 
         fetched = store.get_document("student-1", "doc-1")
 
-        self.assertEqual(len(fetched["passages"]), 1)
-        self.assertEqual(fetched["passages"][0]["text"], "C.")
+        self.assertEqual(fetched["title"], "A mis à jour")
 
 
 class GraphStorageTests(unittest.TestCase):
@@ -361,7 +348,7 @@ class GraphStorageTests(unittest.TestCase):
                     description="Description",
                     target_level=0.8,
                     weight=2.0,
-                    evidence=(graph.Evidence("doc-1", "doc-1:0000", "quote"),),
+                    evidence=(graph.Evidence("doc-1", page=1, quote="quote"),),
                 ),
                 graph.ProposedConcept("b", "B"),
             ),
@@ -369,7 +356,7 @@ class GraphStorageTests(unittest.TestCase):
                 graph.ProposedEdge(
                     "a",
                     "b",
-                    evidence=(graph.Evidence("doc-1", "doc-1:0000"),),
+                    evidence=(graph.Evidence("doc-1", page=1),),
                 ),
             ),
             source_document_ids=("doc-1",),
@@ -394,11 +381,11 @@ class GraphStorageTests(unittest.TestCase):
         self.assertEqual(concept_a["label"], "A")
         self.assertEqual(concept_a["target_level"], 0.8)
         self.assertEqual(concept_a["weight"], 2.0)
-        self.assertEqual(concept_a["evidence"][0]["passage_id"], "doc-1:0000")
+        self.assertEqual(concept_a["evidence"][0]["page"], 1)
         self.assertEqual(concept_a["evidence"][0]["quote"], "quote")
         edge = fetched["edges"][0]
         self.assertEqual((edge["prerequisite_id"], edge["concept_id"]), ("a", "b"))
-        self.assertEqual(edge["evidence"][0]["passage_id"], "doc-1:0000")
+        self.assertEqual(edge["evidence"][0]["page"], 1)
 
     def test_list_graphs_reports_counts(self):
         store = self.make_store()
@@ -481,7 +468,7 @@ class CourseStorageTests(unittest.TestCase):
             title="Cours",
             content="Contenu du cours.",
             citations=[
-                {"document_id": "doc-1", "passage_id": "doc-1:0000", "quote": "extrait"}
+                {"document_id": "doc-1", "page": 1, "quote": "extrait"}
             ],
         )
 
@@ -493,7 +480,7 @@ class CourseStorageTests(unittest.TestCase):
         self.assertEqual(fetched["content"], "Contenu du cours.")
         self.assertEqual(
             fetched["citations"],
-            [{"document_id": "doc-1", "passage_id": "doc-1:0000", "quote": "extrait"}],
+            [{"document_id": "doc-1", "page": 1, "quote": "extrait"}],
         )
 
     def test_list_courses_can_filter_by_concept(self):
@@ -538,7 +525,7 @@ class CitationAndFeedbackTests(unittest.TestCase):
             position=0,
             prompt="Prompt",
             citations=[
-                {"document_id": "doc-1", "passage_id": "doc-1:0000", "quote": "extrait"}
+                {"document_id": "doc-1", "page": 1, "quote": "extrait"}
             ],
         )
 
@@ -547,7 +534,7 @@ class CitationAndFeedbackTests(unittest.TestCase):
 
         self.assertEqual(
             assessment["questions"][0]["citations"],
-            [{"document_id": "doc-1", "passage_id": "doc-1:0000", "quote": "extrait"}],
+            [{"document_id": "doc-1", "page": 1, "quote": "extrait"}],
         )
 
     def test_response_feedback_survives_reopening(self):
@@ -620,6 +607,142 @@ class ParcoursStateTests(unittest.TestCase):
         store.save_parcours_state("student-1", phase="completed")
 
         self.assertEqual(store.get_parcours_state("student-1")["phase"], "completed")
+
+
+class CourseLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "learner.sqlite3"
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def make_store(self):
+        return storage.SQLiteStore(self.database_path)
+
+    def test_course_saved_flag_survives_reopening(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        store.save_course("student-1", "course-1", "a", "Cours", saved=True)
+
+        reopened = self.make_store()
+        self.assertTrue(reopened.get_course("student-1", "course-1")["saved"])
+
+    def test_set_course_saved(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        store.save_course("student-1", "course-1", "a", "Cours")
+        self.assertFalse(store.get_course("student-1", "course-1")["saved"])
+
+        store.set_course_saved("student-1", "course-1", True)
+        self.assertTrue(store.get_course("student-1", "course-1")["saved"])
+
+    def test_set_course_saved_rejects_unknown_course(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        with self.assertRaises(ValueError):
+            store.set_course_saved("student-1", "missing", True)
+
+    def test_delete_course(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        store.save_course("student-1", "course-1", "a", "Cours")
+        store.delete_course("student-1", "course-1")
+        self.assertIsNone(store.get_course("student-1", "course-1"))
+
+    def test_delete_course_rejects_unknown_course(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        with self.assertRaises(ValueError):
+            store.delete_course("student-1", "missing")
+
+
+class ErrorAndHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "learner.sqlite3"
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def make_store(self):
+        return storage.SQLiteStore(self.database_path)
+
+    def test_record_and_list_errors(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        error_id = store.record_error(
+            "student-1", "a", "Confond A et B.", source="exercise"
+        )
+
+        errors = store.list_errors("student-1")
+
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["error_id"], error_id)
+        self.assertEqual(errors[0]["concept_id"], "a")
+        self.assertEqual(errors[0]["description"], "Confond A et B.")
+        self.assertIsNone(errors[0]["resolved_at"])
+
+    def test_list_errors_filters_by_concept_and_resolution(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        first = store.record_error("student-1", "a", "Erreur A.")
+        store.record_error("student-1", "b", "Erreur B.")
+        store.resolve_error("student-1", first)
+
+        self.assertEqual(len(store.list_errors("student-1", concept_id="a")), 1)
+        self.assertEqual(len(store.list_errors("student-1", resolved=False)), 1)
+        self.assertEqual(len(store.list_errors("student-1", resolved=True)), 1)
+
+    def test_resolve_error_rejects_unknown_or_twice(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        error_id = store.record_error("student-1", "a", "Erreur.")
+
+        store.resolve_error("student-1", error_id)
+        with self.assertRaises(ValueError):
+            store.resolve_error("student-1", error_id)
+        with self.assertRaises(ValueError):
+            store.resolve_error("student-1", "missing")
+
+    def test_record_error_rejects_empty_description(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        with self.assertRaises(ValueError):
+            store.record_error("student-1", "a", "   ")
+
+    def test_log_and_list_history(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        store.log_event(
+            "student-1", "document_deposited", payload={"document_id": "doc-1"}
+        )
+        store.log_event(
+            "student-1", "exercise_submitted", concept_id="a", payload={"score": 0.8}
+        )
+
+        history = store.list_history("student-1")
+
+        self.assertEqual(
+            [event["kind"] for event in history],
+            ["document_deposited", "exercise_submitted"],
+        )
+        self.assertEqual(history[0]["payload"], {"document_id": "doc-1"})
+        self.assertEqual(history[1]["concept_id"], "a")
+
+    def test_list_history_filters_by_concept(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        store.log_event("student-1", "course_read", concept_id="a")
+        store.log_event("student-1", "course_read", concept_id="b")
+
+        self.assertEqual(len(store.list_history("student-1", concept_id="a")), 1)
+
+    def test_log_event_rejects_empty_kind(self):
+        store = self.make_store()
+        store.create_learner("student-1")
+        with self.assertRaises(ValueError):
+            store.log_event("student-1", "  ")
 
 
 if __name__ == "__main__":

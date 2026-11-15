@@ -10,30 +10,58 @@ Generator protocol
 ------------------
 The agent/LLM implements Generator:
 
-- propose_graph(passages, objectives, preferences) -> graph mapping
-- generate_initial_evaluation(concepts, passages, objectives, preferences)
+- propose_graph(documents, objectives, preferences) -> graph mapping
+- generate_initial_evaluation(concepts, documents, objectives, preferences)
   -> {"questions": [...]}
-- generate_course(concept, passages, current_level, preferences) -> course mapping
-- generate_exercise(concept, passages, current_level, preferences) -> question mapping
-- generate_final_exam(concepts, passages, objectives, preferences)
+- generate_course(concept, documents, current_level, preferences) -> course mapping
+- generate_exercise(concept, documents, current_level, preferences) -> question mapping
+- generate_final_exam(concepts, documents, objectives, preferences)
   -> {"questions": [...]}
 - grade_response(question, response_text)
   -> {"score", "assistance_coefficient", "feedback"}
 
+`documents` is a list of `{document_id, title, path, media_type}`. The backend
+stores the deposited files as-is and hands the agent their paths; reading,
+extracting and chunking are the agent's job. The agent cites documents by id,
+optionally with a page and a quote.
+
 The engine validates every mapping: required fields, unit-interval
 coefficients, known concept ids, and citations that must reference real
-passages. Invalid output raises ValueError and nothing is persisted.
+documents. Invalid output raises ValueError and nothing is persisted.
+
+Grades proposed by the agent
+----------------------------
+The three submission methods also accept the agent's own grades, so the agent
+can grade without going through a model call:
+
+- submit_initial_evaluation(responses, grades=None)
+- submit_exercise(response_text, grade=None)
+- submit_final_exam(responses, grades=None)
+
+`grades` maps a question id to `{score, assistance_coefficient, feedback}` and
+must cover every submitted response; the generator is then not called. The
+backend validates the coefficients and computes the levels: the agent proposes,
+the backend calculates. `Parcours` accepts `generator=None` as long as every
+grade is explicit.
 
 Phases
 ------
-Parcours(store, learner_id, generator, eta=0.3, prerequisite_threshold=0.75)
+Parcours(store, learner_id, generator=None, eta=0.3, prerequisite_threshold=0.75)
 
-- start(documents, objectives, preferences): saves the documents, proposes and
-  validates the graph, generates the initial evaluation, stores both, and sets
-  the phase to initial_evaluation.
-- submit_initial_evaluation(responses): grades each answer, initializes the
-  concept levels (eta = 1), stores the mastery, completes the assessment and
-  computes the initial gap. The phase becomes learning.
+`generator` may be None as long as every submission carries explicit grades.
+
+- start(documents, objectives, preferences): stores the deposited documents,
+  proposes, validates and stores the graph (phase stays not_started, with a
+  graph_id: graph ready, evaluation pending), then calls
+  prepare_initial_evaluation(). If the evaluation fails, the graph is kept.
+- prepare_initial_evaluation(): generates and stores the initial evaluation
+  of the saved graph and sets the phase to initial_evaluation. Call it again
+  to retry after a failure; the graph is not regenerated.
+- submit_initial_evaluation(responses, grades=None): grades each answer,
+  initializes the concept levels (eta = 1), stores the mastery, completes the
+  assessment and computes the initial gap. The phase becomes learning. When
+  `grades` is given it must cover every response and the generator is not
+  called.
 - next_activity(): uses plan_concepts to select the next concept, generates a
   mini-course and an exercise for it, stores both, and returns them. When no
   concept remains, returns {"type": "final_exam"}.
@@ -43,15 +71,42 @@ Parcours(store, learner_id, generator, eta=0.3, prerequisite_threshold=0.75)
   "Next lesson" button.
 - next_exercise(): generates and stores an exercise for the current concept
   (or the next one when no lesson is in progress). The state records the
-  current assessment. Used by the interface's "Next exercice" button.
+  current assessment. Generated courses that the learner did not save are
+  deleted first: they are considered read. Used by the interface's
+  "Next exercice" button.
+- keep_course(course_id): marks a generated course as kept, so it survives
+  the next exercise.
 - resume_learning(): restarts the learning phase after an insufficient final
   exam, keeping the levels and the initial gap.
-- submit_exercise(response_text): grades the exercise, updates the level with
-  eta, completes the assessment and records a progress snapshot.
+- submit_exercise(response_text, grade=None): grades the exercise, updates the
+  level with eta, completes the assessment and records a progress snapshot.
+  `grade` is the agent's proposal; without it the generator grades.
 - start_final_exam(): generates and stores the final exam.
-- submit_final_exam(responses): grades, re-evaluates the levels, records the
-  final progress and decides whether the levels are sufficient. The phase
-  becomes completed.
+
+Grading: every answer is graded before anything is persisted, so a grading
+failure records nothing and the learner can resubmit. An answer marked
+"je ne sais pas" (`dont_know: true`) or left empty gets a zero
+(score 0, assistance 1) without a model call. The other answers are graded in
+one batch call when the generator offers `grade_responses`; a grade missing or
+malformed in the batch is graded alone with `grade_response`.
+
+Initial evaluation size: at most MAX_INITIAL_QUESTIONS (10) questions on the
+general notions; extra questions are dropped. Concepts without a question
+start at level 0.
+
+Faulty questions (initial evaluation and final exam): a question that is
+malformed, targets a concept outside the graph or repeats an id is dropped
+instead of rejecting the whole assessment (event `questions_discarded`). The
+answer is accepted when nothing was dropped or when the remaining questions
+still cover every concept; otherwise the generator is asked once more with
+the list of errors (`feedback` argument) and the better answer is kept. For
+the initial evaluation, full coverage is not required: the answer is accepted
+when at most a third of its questions were dropped. It fails only when no
+valid question remains.
+- submit_final_exam(responses, grades=None): grades, re-evaluates the levels,
+  records the final progress and decides whether the levels are sufficient.
+  The phase becomes completed. `grades` follows the same rule as the initial
+  evaluation.
 - remediate(): returns the concepts that still need work, using plan_concepts.
 
 State
@@ -71,10 +126,18 @@ Deterministic rules
 - Sufficiency: every concept level is at or above its target level.
 - A course read never changes a level; only scored exercises and exams do.
 
+History and errors
+------------------
+Every action is appended to the learner's history: document_deposited,
+course_generated, course_saved, course_read, exercise_submitted,
+evaluation_submitted, final_exam_submitted. Errors are recorded separately,
+always tied to a concept, by the agent through `store.record_error`.
+
 LLM adapter
 -----------
-`backend/tutor/llm.py` provides PromptLLMGenerator, which builds a prompt per
-task and parses the model's JSON (markdown fences and surrounding prose are
-handled). The caller supplies the `complete` callable, so the Hermes agent or
-any model API can be plugged in. The prompts are starting points and should be
-refined against real model outputs.
+The Generator protocol is the LLM boundary. `backend/web/generators.py`
+provides `HermesGenerator`, which calls the Hermes agent as a subprocess and
+parses the JSON from its final response (markdown fences and surrounding prose
+are handled). The agent reads the learner's profile and documents with its own
+tools; the backend validates and persists every proposal. The prompts are
+starting points and should be refined against real agent outputs.

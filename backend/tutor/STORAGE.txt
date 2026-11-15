@@ -16,20 +16,23 @@ Stored:
   difficulty coefficient and citations;
 - responses: attempt number, text, raw score, assistance coefficient, feedback
   and submission timestamp;
-- journey state: concept mastery (current/target level, weight, label) and
-  progress snapshots (initial/current gap, progress fraction);
-- deposited documents and their passages, with page and heading references;
+- concept mastery: current/target level, weight, label;
+- progress snapshots: initial/current gap, progress fraction;
+- deposited documents: id, title, file path, media type and metadata; the file
+  itself is stored unchanged on disk, no passage is extracted;
+- errors made by the learner: concept id, description, source, date, resolution;
+- history events: one row per action (document deposited, course read, exercise
+  submitted, error recorded, ...);
 - concept graphs (proposed, validated or corrected) with per-concept and
   per-edge evidence;
-- generated mini-courses with their citations;
+- generated mini-courses with their citations and a `saved` flag;
 - the learning-path state: phase, graph id, initial gap, current assessment,
   current concept, objectives and preferences.
 
 Not stored:
-- the extraction of concepts and relations from the documents: the agent
-  proposes them and the graph module validates and corrects them;
-- the vector index used for retrieval. Passages are stored and citable, but
-  semantic search over them is a later step;
+- the text extraction and chunking of the documents: the agent reads the
+  deposited files from their recorded path;
+- the vector index used for retrieval;
 - the model's raw prompts and completions. Only the validated content and
   grades are persisted.
 
@@ -49,9 +52,12 @@ Defined below; every write is validated before it reaches SQL.
   target_level, weight, updated_at, PK(learner_id, concept_id))
 - progress_snapshots(snapshot_id PK, learner_id FK, assessment_id,
   initial_gap, current_gap, progress_fraction, recorded_at)
-- documents(document_id PK, learner_id FK, title, source, media_type,
+- documents(document_id PK, learner_id FK, title, path, media_type,
   metadata_json, created_at)
-- passages(passage_id PK, document_id FK, ordinal, page, heading, text)
+- errors(error_id PK, learner_id FK, concept_id, description, source,
+  occurred_at, resolved_at, UNIQUE(error_id, learner_id))
+- history_events(event_id PK, learner_id FK, concept_id, kind, payload_json,
+  created_at)
 - concept_graphs(graph_id PK, learner_id FK, status, notes,
   source_document_ids_json, created_at, updated_at)
 - graph_concepts(graph_id FK, concept_id, label, description, target_level,
@@ -59,7 +65,7 @@ Defined below; every write is validated before it reaches SQL.
 - graph_edges(graph_id FK, prerequisite_id, concept_id, evidence_json,
   PK(graph_id, prerequisite_id, concept_id))
 - courses(course_id PK, learner_id FK, concept_id, title, content,
-  citations_json, created_at)
+  citations_json, saved, created_at)
 - parcours_state(learner_id PK FK, graph_id, phase, initial_gap,
   current_assessment_id, current_concept_id, objectives, preferences_json,
   updated_at)
@@ -79,10 +85,10 @@ Guarantees
   safe and does not duplicate or drop data.
 - Foreign keys are enforced (`PRAGMA foreign_keys = ON`); deleting a learner
   cascades to its assessments, questions, responses, mastery, snapshots,
-  documents, passages, graphs and courses.
-- Documents, passages, graphs and courses are scoped to a learner: reading
-  another learner's rows returns `None`, and saving over another learner's row
-  raises.
+  documents, errors, history events, graphs and courses.
+- Documents, graphs, courses, errors and history events are scoped to a
+  learner: reading another learner's rows returns `None`, and saving over
+  another learner's row raises.
 - Every write runs in a transaction: commit on success, rollback on error.
 - Invalid identifiers, kinds, levels, scores and coefficients raise
   `ValueError` before any row is written.
@@ -110,21 +116,26 @@ get_assessment(assessment_id) -> dict | None
 save_mastery(learner_id, concept_id, current_level, target_level=1.0,
              weight=1.0, concept_label=None)
 get_mastery(learner_id) -> list[dict]
+record_error(learner_id, concept_id, description, source="") -> str
+list_errors(learner_id, concept_id=None, resolved=None) -> list[dict]
+resolve_error(learner_id, error_id)
+log_event(learner_id, kind, concept_id=None, payload=None) -> str
+list_history(learner_id, concept_id=None) -> list[dict]
 record_progress(learner_id, initial_gap, current_gap, assessment_id=None) -> str
 get_progress_history(learner_id) -> list[dict]
 save_document(learner_id, document)
 get_document(learner_id, document_id) -> dict | None
-  Each passage includes its document_id, so the orchestration can cite the
-  source document of a passage.
 list_documents(learner_id) -> list[dict]
 save_graph(learner_id, proposal, status="proposed")
 get_graph(learner_id, graph_id) -> dict | None
 list_graphs(learner_id) -> list[dict]
 set_graph_status(learner_id, graph_id, status)
 save_course(learner_id, course_id, concept_id, title, content="",
-            citations=None)
+            citations=None, saved=False)
 get_course(learner_id, course_id) -> dict | None
 list_courses(learner_id, concept_id=None) -> list[dict]
+set_course_saved(learner_id, course_id, saved)
+delete_course(learner_id, course_id)
 save_parcours_state(learner_id, phase, graph_id=None, initial_gap=None,
                     current_assessment_id=None, current_concept_id=None,
                     objectives="", preferences=None)
@@ -134,9 +145,6 @@ Limitations
 -----------
 - The concept graph is stored, but its extraction from documents is the
   agent's job; the graph module validates and corrects a proposal.
-- A learner's profile and preferences are written at creation and read back,
-  but there is no update method yet; configuration changes belong to a later
-  step.
 - Assessments are read by id. There is no listing method yet, so a history view
   would need one; resuming a known assessment works.
 - There is no schema migration mechanism; evolving the schema requires a
@@ -144,14 +152,14 @@ Limitations
   be recreated.
 
 Verification
--------------
+------------
 Run the persistence tests with:
 
     python -m unittest discover -v
 
 `backend/tests/test_storage.py` reopens the same database file after writing
 and checks the profile, an assessment with its questions and responses, the
-concept mastery, the progress history, the documents and passages, the concept
-graphs with their evidence, the courses and the learning-path state. It also
-checks that invalid inputs are rejected, that rows are scoped to the learner,
-and that an in-progress assessment can be resumed.
+concept mastery, the progress history, the deposited documents, the errors and
+history events, the concept graphs with their evidence, the courses and the
+learning-path state. It also checks that invalid inputs are rejected, that rows
+are scoped to the learner, and that an in-progress assessment can be resumed.

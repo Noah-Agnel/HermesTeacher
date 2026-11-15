@@ -9,6 +9,7 @@ exercises and evaluations, and grades free-form responses.
 
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from statistics import mean
@@ -35,32 +36,43 @@ class Generator(ABC):
 
     Implementations return JSON-compatible mappings. The engine validates them
     and turns them into persisted assessments, questions, courses and grades.
+
+    The backend stores deposited documents as-is, with a text companion
+    converted at upload, and hands the agent their records (id, title, path).
+    Implementations decide how the agent gets the content (the web generator
+    inlines the text); the agent cites documents by id, optionally with a page
+    and a quote.
     """
 
     @abstractmethod
     def propose_graph(
         self,
-        passages: list[dict[str, Any]],
+        documents: list[dict[str, Any]],
         objectives: str,
         preferences: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
-        """Propose a concept graph from the learner's document passages."""
+        """Propose a concept graph from the learner's deposited documents."""
 
     @abstractmethod
     def generate_initial_evaluation(
         self,
         concepts: list[dict[str, Any]],
-        passages: list[dict[str, Any]],
+        documents: list[dict[str, Any]],
         objectives: str,
         preferences: Mapping[str, Any] | None = None,
+        feedback: str | None = None,
     ) -> Mapping[str, Any]:
-        """Generate the initial evaluation covering the concepts."""
+        """Generate the initial evaluation covering the concepts.
+
+        ``feedback`` is set when a previous answer had to be corrected: it
+        names the rejected questions and the allowed concept ids.
+        """
 
     @abstractmethod
     def generate_course(
         self,
         concept: dict[str, Any],
-        passages: list[dict[str, Any]],
+        documents: list[dict[str, Any]],
         current_level: float,
         preferences: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
@@ -70,7 +82,7 @@ class Generator(ABC):
     def generate_exercise(
         self,
         concept: dict[str, Any],
-        passages: list[dict[str, Any]],
+        documents: list[dict[str, Any]],
         current_level: float,
         preferences: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
@@ -80,17 +92,38 @@ class Generator(ABC):
     def generate_final_exam(
         self,
         concepts: list[dict[str, Any]],
-        passages: list[dict[str, Any]],
+        documents: list[dict[str, Any]],
         objectives: str,
         preferences: Mapping[str, Any] | None = None,
+        feedback: str | None = None,
     ) -> Mapping[str, Any]:
-        """Generate the final exam."""
+        """Generate the final exam.
+
+        ``feedback`` is set when a previous answer had to be corrected: it
+        names the rejected questions and the allowed concept ids.
+        """
 
     @abstractmethod
     def grade_response(
         self, question: dict[str, Any], response_text: str
     ) -> Mapping[str, Any]:
         """Grade a free-form response and estimate the assistance used."""
+
+    def grade_responses(
+        self, items: list[dict[str, Any]]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        """Grade several responses at once: question_id → grade.
+
+        ``items`` holds ``{"question": ..., "response_text": ...}``. The
+        default grades one by one; implementations may use a single call.
+        Missing question ids are graded one by one by the engine.
+        """
+        return {
+            item["question"]["question_id"]: self.grade_response(
+                item["question"], item["response_text"]
+            )
+            for item in items
+        }
 
 
 def _require_mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -108,7 +141,7 @@ def _require_text(value: Any, name: str, *, allow_empty: bool = False) -> str:
 
 
 def _parse_citations(
-    value: Any, known_passages: set[str] | None = None
+    value: Any, known_documents: set[str] | None = None
 ) -> list[dict[str, Any]]:
     if value is None:
         value = []
@@ -119,26 +152,27 @@ def _parse_citations(
         if not isinstance(item, Mapping):
             raise ValueError("each citation must be a mapping")
         document_id = item.get("document_id")
-        passage_id = item.get("passage_id")
+        page = item.get("page")
         quote = item.get("quote")
         if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError("citation document_id must be a non-empty string")
-        if not isinstance(passage_id, str) or not passage_id.strip():
-            raise ValueError("citation passage_id must be a non-empty string")
+        if page is not None:
+            if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+                raise ValueError("citation page must be a positive integer or None")
         if quote is not None and not isinstance(quote, str):
             raise ValueError("citation quote must be a string or None")
-        if known_passages is not None and passage_id not in known_passages:
+        if known_documents is not None and document_id not in known_documents:
             raise ValueError(
-                f"citation references unknown passage {passage_id!r}"
+                f"citation references unknown document {document_id!r}"
             )
         citations.append(
-            {"document_id": document_id, "passage_id": passage_id, "quote": quote}
+            {"document_id": document_id, "page": page, "quote": quote}
         )
     return citations
 
 
 def parse_question(
-    data: Any, known_passages: set[str] | None = None
+    data: Any, known_documents: set[str] | None = None
 ) -> dict[str, Any]:
     data = _require_mapping(data, "question")
     difficulty = data.get("difficulty_coefficient", 1.0)
@@ -158,22 +192,120 @@ def parse_question(
             data.get("grading_rubric", ""), "grading_rubric", allow_empty=True
         ),
         "difficulty_coefficient": difficulty,
-        "citations": _parse_citations(data.get("citations"), known_passages),
+        "citations": _parse_citations(data.get("citations"), known_documents),
     }
 
 
 def parse_assessment(
-    data: Any, known_passages: set[str] | None = None
+    data: Any, known_documents: set[str] | None = None
 ) -> list[dict[str, Any]]:
     data = _require_mapping(data, "assessment")
     questions = data.get("questions")
     if not isinstance(questions, list) or not questions:
         raise ValueError("assessment must contain at least one question")
-    return [parse_question(item, known_passages) for item in questions]
+    return [parse_question(item, known_documents) for item in questions]
 
+
+
+MAX_ASSESSMENT_ATTEMPTS = 2
+MAX_INITIAL_QUESTIONS = 10
+
+# Grade given without calling the model when the learner ticked "je ne sais
+# pas" or left the answer empty: there is nothing to judge, so the backend
+# records a zero instead of spending a model call on an empty answer.
+DONT_KNOW_FEEDBACK = "Pas de réponse (« je ne sais pas »)."
+
+
+def _dont_know_grade() -> dict[str, Any]:
+    return {"score": 0.0, "assistance_coefficient": 1.0, "feedback": DONT_KNOW_FEEDBACK}
+
+
+def is_blank_response(item: Mapping[str, Any]) -> bool:
+    """True when the learner ticked "je ne sais pas" or wrote nothing."""
+    text = item.get("response_text")
+    return bool(item.get("dont_know")) or not (isinstance(text, str) and text.strip())
+
+
+def _call_generator(method: Any, *args: Any, feedback: str | None = None) -> Any:
+    """Call a generator method, passing ``feedback`` only if it accepts it."""
+    if feedback is not None:
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            parameters = []
+        if any(
+            parameter.name == "feedback" or parameter.kind is parameter.VAR_KEYWORD
+            for parameter in parameters
+        ):
+            return method(*args, feedback=feedback)
+    return method(*args)
+
+
+def screen_assessment(
+    data: Any,
+    known_concepts: set[str],
+    known_documents: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Split an assessment into valid questions and rejected ones.
+
+    A question is rejected when it is malformed, targets a concept outside the
+    graph or repeats a question id. Rejected questions are returned with the
+    reason, so one faulty question no longer discards the whole assessment.
+    """
+    try:
+        data = _require_mapping(data, "assessment")
+    except ValueError as error:
+        return [], [{"question_id": "?", "reason": str(error)}]
+    items = data.get("questions")
+    if not isinstance(items, list) or not items:
+        return [], [{"question_id": "?", "reason": "assessment must contain at least one question"}]
+    valid: list[dict[str, Any]] = []
+    rejected: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        question_id = item.get("question_id", "?") if isinstance(item, Mapping) else "?"
+        try:
+            question = parse_question(item, known_documents)
+        except ValueError as error:
+            rejected.append({"question_id": str(question_id), "reason": str(error)})
+            continue
+        if question["concept_id"] not in known_concepts:
+            rejected.append(
+                {
+                    "question_id": question["question_id"],
+                    "reason": f"unknown concept {question['concept_id']!r}",
+                }
+            )
+            continue
+        if question["question_id"] in seen:
+            rejected.append(
+                {"question_id": question["question_id"], "reason": "duplicate question_id"}
+            )
+            continue
+        seen.add(question["question_id"])
+        valid.append(question)
+    return valid, rejected
+
+
+def _correction_feedback(
+    rejected: list[dict[str, str]],
+    concept_ids: list[str],
+    require_coverage: bool = True,
+) -> str:
+    lines = [f"- {item['question_id']} : {item['reason']}" for item in rejected]
+    text = (
+        "Ta réponse précédente contenait des questions invalides :\n"
+        + "\n".join(lines)
+        + "\nUtilise uniquement ces concept_id : "
+        + ", ".join(concept_ids)
+        + "."
+    )
+    if require_coverage:
+        text += " Couvre chaque concept par au moins une question."
+    return text
 
 def parse_course(
-    data: Any, known_passages: set[str] | None = None
+    data: Any, known_documents: set[str] | None = None
 ) -> dict[str, Any]:
     data = _require_mapping(data, "course")
     return {
@@ -182,7 +314,7 @@ def parse_course(
         "content": _require_text(
             data.get("content", ""), "content", allow_empty=True
         ),
-        "citations": _parse_citations(data.get("citations"), known_passages),
+        "citations": _parse_citations(data.get("citations"), known_documents),
     }
 
 
@@ -215,7 +347,7 @@ class Parcours:
         self,
         store,
         learner_id: str,
-        generator: Generator,
+        generator: Generator | None = None,
         *,
         eta: float = DEFAULT_ETA,
         prerequisite_threshold: float = DEFAULT_PREREQUISITE_THRESHOLD,
@@ -261,6 +393,119 @@ class Parcours:
             preferences=state.get("preferences"),
         )
 
+    def _grade(
+        self,
+        question: dict[str, Any],
+        response_text: str,
+        grade: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return the parsed grade: the agent's proposal, or the generator's.
+
+        The backend never decides a score itself. An explicit proposal is
+        validated as-is; without one, the generator (the LLM boundary) grades
+        the response.
+        """
+        if grade is not None:
+            return parse_grade(grade)
+        if not response_text.strip():
+            return _dont_know_grade()
+        if self.generator is None:
+            raise ValueError("no generator is available to grade the response")
+        return parse_grade(self.generator.grade_response(question, response_text))
+
+    def _grade_responses(
+        self,
+        by_question: dict[str, Any],
+        responses: Sequence[Mapping[str, Any]],
+        grades: Mapping[str, Mapping[str, Any]] | None,
+    ) -> list[tuple[dict[str, Any], str, dict[str, Any]]]:
+        """Grade every response before anything is persisted.
+
+        Blank answers ("je ne sais pas" or empty) get a zero without a model
+        call. Explicit grades are used as-is. The others are graded in one
+        batch call when the generator offers ``grade_responses``, otherwise
+        one by one. Returns ``(question, response_text, grade)`` in order.
+        """
+        items: list[tuple[dict[str, Any], str, bool]] = []
+        for item in responses:
+            item = _require_mapping(item, "response")
+            question_id = item.get("question_id")
+            response_text = item.get("response_text", "")
+            if question_id not in by_question:
+                raise ValueError(f"unknown question {question_id!r}")
+            if not isinstance(response_text, str):
+                raise ValueError("response_text must be a string")
+            blank = is_blank_response(item)
+            items.append((by_question[question_id], "" if blank else response_text, blank))
+
+        results: dict[str, dict[str, Any]] = {}
+        to_model: list[tuple[dict[str, Any], str]] = []
+        for question, response_text, blank in items:
+            question_id = question["question_id"]
+            if grades is not None and question_id in grades:
+                results[question_id] = parse_grade(grades[question_id])
+            elif blank:
+                results[question_id] = _dont_know_grade()
+            else:
+                to_model.append((question, response_text))
+
+        if to_model:
+            if self.generator is None:
+                raise ValueError("no generator is available to grade the response")
+            batch = getattr(self.generator, "grade_responses", None)
+            proposed: Mapping[str, Any] = {}
+            if callable(batch) and len(to_model) > 1:
+                proposed = batch(
+                    [
+                        {"question": question, "response_text": response_text}
+                        for question, response_text in to_model
+                    ]
+                )
+            for question, response_text in to_model:
+                question_id = question["question_id"]
+                grade = None
+                if question_id in proposed:
+                    try:
+                        grade = parse_grade(proposed[question_id])
+                    except ValueError:
+                        grade = None  # malformed batch grade: grade it alone
+                if grade is not None:
+                    results[question_id] = grade
+                else:
+                    results[question_id] = parse_grade(
+                        self.generator.grade_response(question, response_text)
+                    )
+        return [(question, text, results[question["question_id"]]) for question, text, _ in items]
+
+    @staticmethod
+    def _check_grades(
+        by_question: dict[str, Any],
+        grades: Mapping[str, Mapping[str, Any]] | None,
+        responses: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Validate an explicit grade mapping against the answered questions.
+
+        An explicit mapping must cover every submitted response and may not
+        reference a question outside the assessment.
+        """
+        if grades is None:
+            return
+        if not isinstance(grades, Mapping):
+            raise ValueError("grades must be a mapping of question_id to grade")
+        answered = [
+            item.get("question_id")
+            for item in responses
+            if isinstance(item, Mapping)
+            and isinstance(item.get("question_id"), str)
+            and not is_blank_response(item)
+        ]
+        unknown = set(grades) - set(by_question)
+        if unknown:
+            raise ValueError(f"grades reference unknown questions: {sorted(unknown)}")
+        missing = set(answered) - set(grades)
+        if missing:
+            raise ValueError(f"missing grades for questions: {sorted(missing)}")
+
     def _proposal(self, graph_id: str) -> ConceptGraphProposal:
         data = self.store.get_graph(self.learner_id, graph_id)
         if data is None:
@@ -281,17 +526,25 @@ class Parcours:
             }
         )
 
-    def _passages(self, graph_id: str) -> list[dict[str, Any]]:
+    def _documents(self, graph_id: str) -> list[dict[str, Any]]:
+        """Return the deposited documents linked to a graph, as agent inputs."""
         data = self.store.get_graph(self.learner_id, graph_id)
-        passages: list[dict[str, Any]] = []
+        documents: list[dict[str, Any]] = []
         for document_id in data["source_document_ids"]:
             document = self.store.get_document(self.learner_id, document_id)
             if document is not None:
-                passages.extend(document["passages"])
-        return passages
+                documents.append(
+                    {
+                        "document_id": document["document_id"],
+                        "title": document["title"],
+                        "path": document["path"],
+                        "media_type": document["media_type"],
+                    }
+                )
+        return documents
 
-    def _known_passages(self, graph_id: str) -> set[str]:
-        return {passage["passage_id"] for passage in self._passages(graph_id)}
+    def _known_documents(self, graph_id: str) -> set[str]:
+        return {document["document_id"] for document in self._documents(graph_id)}
 
     def _concept_mapping(self, concept) -> dict[str, Any]:
         return {
@@ -319,32 +572,21 @@ class Parcours:
         weights = {concept.concept_id: concept.weight for concept in proposal.concepts}
         return weighted_gap(current, target, weights)
 
-    def _passage_dicts(self, documents: Sequence[Document]) -> list[dict[str, Any]]:
-        passages: list[dict[str, Any]] = []
+    def _document_dicts(self, documents: Sequence[Document]) -> list[dict[str, Any]]:
+        """Return the deposited documents as agent inputs (id, title, path)."""
+        result: list[dict[str, Any]] = []
         for document in documents:
             if not isinstance(document, Document):
                 raise ValueError("documents must be Document instances")
-            for passage in document.passages:
-                passages.append(
-                    {
-                        "passage_id": passage.passage_id,
-                        "document_id": passage.document_id,
-                        "page": passage.page,
-                        "heading": passage.heading,
-                        "text": passage.text,
-                    }
-                )
-        return passages
-
-    def _validate_question_concepts(
-        self, questions: list[dict[str, Any]], known_concepts: set[str]
-    ) -> None:
-        for question in questions:
-            if question["concept_id"] not in known_concepts:
-                raise ValueError(
-                    f"question {question['question_id']!r} references unknown "
-                    f"concept {question['concept_id']!r}"
-                )
+            result.append(
+                {
+                    "document_id": document.document_id,
+                    "title": document.title,
+                    "path": document.path,
+                    "media_type": document.media_type,
+                }
+            )
+        return result
 
     def _store_questions(self, assessment_id: str, questions: list[dict[str, Any]]) -> None:
         for position, question in enumerate(questions):
@@ -371,33 +613,70 @@ class Parcours:
     ) -> dict[str, Any]:
         """Propose the graph, generate the initial evaluation and persist both."""
         state = self._state()
-        if state["phase"] != "not_started":
+        if state["phase"] != "not_started" or state.get("graph_id"):
             raise ValueError("the parcours has already started")
         if not isinstance(objectives, str):
             raise ValueError("objectives must be a string")
 
-        passages = self._passage_dicts(documents)
+        document_dicts = self._document_dicts(documents)
         for document in documents:
             self.store.save_document(self.learner_id, document)
-        known = {passage["passage_id"] for passage in passages}
+            self.store.log_event(
+                self.learner_id,
+                "document_deposited",
+                payload={
+                    "document_id": document.document_id,
+                    "title": document.title,
+                },
+            )
+        known = {document["document_id"] for document in document_dicts}
 
-        graph_mapping = self.generator.propose_graph(passages, objectives, preferences)
+        graph_mapping = self.generator.propose_graph(document_dicts, objectives, preferences)
         proposal = ConceptGraphProposal.from_mapping(graph_mapping)
-        report = proposal.validate(known_passages=known)
+        report = proposal.validate(known_documents=known)
         if not report.is_valid:
             details = "; ".join(
                 f"{issue.code}: {issue.message}" for issue in report.issues
             )
             raise ValueError(f"proposed graph is invalid: {details}")
         self.store.save_graph(self.learner_id, proposal, status="proposed")
-
-        concepts = [self._concept_mapping(concept) for concept in proposal.concepts]
-        assessment_data = self.generator.generate_initial_evaluation(
-            concepts, passages, objectives, preferences
+        # The graph is persisted before the evaluation. If the evaluation
+        # fails, the parcours stays "not_started" with a graph_id (graph
+        # ready, evaluation pending, the same convention as agent_tools) and
+        # prepare_initial_evaluation() can be retried without a new graph.
+        self._save_state(
+            phase="not_started",
+            graph_id=proposal.graph_id,
+            current_assessment_id=None,
+            current_concept_id=None,
+            objectives=objectives,
+            preferences=preferences,
         )
-        questions = parse_assessment(assessment_data, known_passages=known)
-        self._validate_question_concepts(
-            questions, {concept.concept_id for concept in proposal.concepts}
+        return self.prepare_initial_evaluation()
+
+    def prepare_initial_evaluation(self) -> dict[str, Any]:
+        """Generate and store the initial evaluation of the persisted graph.
+
+        Called by start(); call it again to retry after a failure. Requires
+        a persisted graph and no evaluation yet (phase "not_started" with a
+        graph_id).
+        """
+        state = self._state()
+        if state["phase"] != "not_started" or not state.get("graph_id"):
+            raise ValueError("the concept graph is not ready for the initial evaluation")
+        graph_id = state["graph_id"]
+        proposal = self._proposal(graph_id)
+        concepts = [self._concept_mapping(concept) for concept in proposal.concepts]
+        questions = self._generate_assessment(
+            self.generator.generate_initial_evaluation,
+            concepts,
+            self._documents(graph_id),
+            state.get("objectives", ""),
+            state.get("preferences"),
+            known_documents=self._known_documents(graph_id),
+            kind="initial_evaluation",
+            require_coverage=False,
+            max_questions=MAX_INITIAL_QUESTIONS,
         )
 
         assessment_id = uuid4().hex
@@ -405,27 +684,100 @@ class Parcours:
             assessment_id,
             self.learner_id,
             kind="evaluation",
-            source_metadata={"phase": "initial", "graph_id": proposal.graph_id},
+            source_metadata={"phase": "initial", "graph_id": graph_id},
         )
         self._store_questions(assessment_id, questions)
         self._save_state(
             phase="initial_evaluation",
-            graph_id=proposal.graph_id,
             current_assessment_id=assessment_id,
             current_concept_id=None,
-            objectives=objectives,
-            preferences=preferences,
         )
         return {
-            "graph_id": proposal.graph_id,
+            "graph_id": graph_id,
             "assessment_id": assessment_id,
             "questions": questions,
         }
 
+    def _generate_assessment(
+        self,
+        method: Any,
+        concepts: list[dict[str, Any]],
+        documents: list[dict[str, Any]],
+        objectives: str,
+        preferences: Mapping[str, Any] | None,
+        *,
+        known_documents: set[str],
+        kind: str,
+        require_coverage: bool = True,
+        max_questions: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Ask the generator for an assessment, keeping only valid questions.
+
+        Faulty questions (unknown concept, malformed, duplicated) are dropped.
+        The answer is accepted when nothing was dropped, or when the remaining
+        questions still cover every concept (``require_coverage``, final exam)
+        or when at most a third of the questions were dropped (initial
+        evaluation, which only targets the general notions). Otherwise the
+        generator is asked once more with the list of errors; the better of
+        the two answers is kept. It fails only when no valid question remains.
+        ``max_questions`` caps the number of kept questions.
+        """
+        concept_ids = [concept["concept_id"] for concept in concepts]
+        known_concepts = set(concept_ids)
+        candidates: list[tuple[list[dict[str, Any]], list[dict[str, str]]]] = []
+        feedback: str | None = None
+        for _ in range(MAX_ASSESSMENT_ATTEMPTS):
+            data = _call_generator(
+                method, concepts, documents, objectives, preferences, feedback=feedback
+            )
+            valid, rejected = screen_assessment(data, known_concepts, known_documents)
+            candidates.append((valid, rejected))
+            if require_coverage:
+                covered = {question["concept_id"] for question in valid}
+                acceptable = bool(valid) and covered >= known_concepts
+            else:
+                # at most a third of the questions dropped
+                acceptable = bool(valid) and 3 * len(rejected) <= len(valid) + len(rejected)
+            if not rejected or acceptable:
+                break
+            feedback = _correction_feedback(rejected, concept_ids, require_coverage)
+
+        def quality(candidate):
+            valid, _ = candidate
+            return (len({question["concept_id"] for question in valid}), len(valid))
+
+        # max() keeps the first best; prefer the latest answer on ties.
+        valid, rejected = max(reversed(candidates), key=quality)
+        if not valid:
+            details = "; ".join(
+                f"{item['question_id']}: {item['reason']}" for item in rejected
+            )
+            raise ValueError(f"no valid question in the generated {kind}: {details}")
+        if max_questions is not None and len(valid) > max_questions:
+            rejected = rejected + [
+                {"question_id": question["question_id"], "reason": "too many questions"}
+                for question in valid[max_questions:]
+            ]
+            valid = valid[:max_questions]
+        if rejected:
+            self.store.log_event(
+                self.learner_id,
+                "questions_discarded",
+                payload={"assessment": kind, "rejected": rejected},
+            )
+        return valid
+
     def submit_initial_evaluation(
-        self, responses: Sequence[Mapping[str, Any]]
+        self,
+        responses: Sequence[Mapping[str, Any]],
+        grades: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Grade the initial evaluation and compute the initial levels and gap."""
+        """Grade the initial evaluation and compute the initial levels and gap.
+
+        ``grades`` maps a question id to the agent's proposal (score,
+        assistance_coefficient, feedback). When it is given it must cover
+        every submitted response, and the generator is not called.
+        """
         state = self._state()
         if state["phase"] != "initial_evaluation":
             raise ValueError("the parcours is not in the initial evaluation phase")
@@ -435,23 +787,15 @@ class Parcours:
             raise ValueError("initial assessment not found")
 
         by_question = {question["question_id"]: question for question in assessment["questions"]}
+        self._check_grades(by_question, grades, responses)
         attempts_by_concept: dict[str, list[Attempt]] = {}
         scores: list[float] = []
-        for item in responses:
-            item = _require_mapping(item, "response")
-            question_id = item.get("question_id")
-            response_text = item.get("response_text")
-            if question_id not in by_question:
-                raise ValueError(f"unknown question {question_id!r}")
-            if not isinstance(response_text, str):
-                raise ValueError("response_text must be a string")
-            question = by_question[question_id]
-            grade = parse_grade(
-                self.generator.grade_response(question, response_text)
-            )
+        for question, response_text, grade in self._grade_responses(
+            by_question, responses, grades
+        ):
             self.store.record_response(
                 uuid4().hex,
-                question_id,
+                question["question_id"],
                 response_text,
                 grade["score"],
                 grade["assistance_coefficient"],
@@ -485,6 +829,14 @@ class Parcours:
 
         self.store.complete_assessment(
             assessment_id, raw_score=mean(scores) if scores else 0.0
+        )
+        self.store.log_event(
+            self.learner_id,
+            "evaluation_submitted",
+            payload={
+                "assessment_id": assessment_id,
+                "raw_score": mean(scores) if scores else 0.0,
+            },
         )
         target = {concept.concept_id: concept.target_level for concept in proposal.concepts}
         weights = {concept.concept_id: concept.weight for concept in proposal.concepts}
@@ -525,15 +877,15 @@ class Parcours:
         self, concept_id: str, concept: Any, current_level: float
     ) -> dict[str, Any]:
         state = self._state()
-        passages = self._passages(state["graph_id"])
-        known = self._known_passages(state["graph_id"])
+        documents = self._documents(state["graph_id"])
+        known = self._known_documents(state["graph_id"])
         course_data = self.generator.generate_course(
             self._concept_mapping(concept),
-            passages,
+            documents,
             current_level,
             state.get("preferences"),
         )
-        course = parse_course(course_data, known_passages=known)
+        course = parse_course(course_data, known_documents=known)
         if course["concept_id"] != concept_id:
             raise ValueError("the generated course must target the selected concept")
         return course
@@ -542,18 +894,50 @@ class Parcours:
         self, concept_id: str, concept: Any, current_level: float
     ) -> dict[str, Any]:
         state = self._state()
-        passages = self._passages(state["graph_id"])
-        known = self._known_passages(state["graph_id"])
+        documents = self._documents(state["graph_id"])
+        known = self._known_documents(state["graph_id"])
         exercise_data = self.generator.generate_exercise(
             self._concept_mapping(concept),
-            passages,
+            documents,
             current_level,
             state.get("preferences"),
         )
-        question = parse_question(exercise_data, known_passages=known)
+        question = parse_question(exercise_data, known_documents=known)
         if question["concept_id"] != concept_id:
             raise ValueError("the generated exercise must target the selected concept")
         return question
+
+    def _discard_unsaved_courses(self, concept_id: str) -> list[str]:
+        """Delete the generated courses the learner did not keep.
+
+        A course is considered read once the learner moves on to the next
+        exercise, unless it was explicitly saved.
+        """
+        discarded: list[str] = []
+        for course in self.store.list_courses(self.learner_id, concept_id=concept_id):
+            if not course.get("saved", False):
+                self.store.delete_course(self.learner_id, course["course_id"])
+                discarded.append(course["course_id"])
+                self.store.log_event(
+                    self.learner_id,
+                    "course_read",
+                    concept_id=concept_id,
+                    payload={"course_id": course["course_id"], "title": course["title"]},
+                )
+        return discarded
+
+    def keep_course(self, course_id: str) -> None:
+        """Mark a generated course as kept by the learner."""
+        state = self._state()
+        if state["phase"] != "learning":
+            raise ValueError("the parcours is not in the learning phase")
+        self.store.set_course_saved(self.learner_id, course_id, True)
+        self.store.log_event(
+            self.learner_id,
+            "course_saved",
+            concept_id=state.get("current_concept_id"),
+            payload={"course_id": course_id},
+        )
 
     def next_lesson(self) -> dict[str, Any]:
         """Generate and store the next mini-course, or signal the final exam."""
@@ -571,6 +955,12 @@ class Parcours:
             course["content"],
             course["citations"],
         )
+        self.store.log_event(
+            self.learner_id,
+            "course_generated",
+            concept_id=concept_id,
+            payload={"course_id": course_id, "title": course["title"]},
+        )
         self._save_state(
             phase="learning", current_concept_id=concept_id, current_assessment_id=None
         )
@@ -579,6 +969,7 @@ class Parcours:
             "concept_id": concept_id,
             "concept_label": concept.label,
             "course": course,
+            "course_id": course_id,
         }
 
     def next_exercise(self) -> dict[str, Any]:
@@ -600,6 +991,7 @@ class Parcours:
             if concept is None:
                 raise ValueError("the current lesson concept is not in the graph")
             current_level = self._mastery_levels().get(concept_id, 0.0)
+        self._discard_unsaved_courses(concept_id)
         question = self._generate_exercise(concept_id, concept, current_level)
         assessment_id = uuid4().hex
         self.store.create_assessment(
@@ -641,6 +1033,12 @@ class Parcours:
             course["content"],
             course["citations"],
         )
+        self.store.log_event(
+            self.learner_id,
+            "course_generated",
+            concept_id=concept_id,
+            payload={"course_id": course_id, "title": course["title"]},
+        )
         assessment_id = uuid4().hex
         self.store.create_assessment(
             assessment_id,
@@ -667,8 +1065,16 @@ class Parcours:
             "assessment_id": assessment_id,
         }
 
-    def submit_exercise(self, response_text: str) -> dict[str, Any]:
-        """Grade an exercise, update the level and record the progress."""
+    def submit_exercise(
+        self,
+        response_text: str,
+        grade: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Grade an exercise, update the level and record the progress.
+
+        ``grade`` is the agent's proposal (score, assistance_coefficient,
+        feedback). When it is omitted, the generator grades the response.
+        """
         state = self._state()
         if state["phase"] != "learning" or state["current_assessment_id"] is None:
             raise ValueError("no exercise in progress")
@@ -680,14 +1086,14 @@ class Parcours:
         if not isinstance(response_text, str):
             raise ValueError("response_text must be a string")
 
-        grade = parse_grade(self.generator.grade_response(question, response_text))
+        parsed = self._grade(question, response_text, grade)
         self.store.record_response(
             uuid4().hex,
             question["question_id"],
             response_text,
-            grade["score"],
-            grade["assistance_coefficient"],
-            feedback=grade["feedback"],
+            parsed["score"],
+            parsed["assistance_coefficient"],
+            feedback=parsed["feedback"],
         )
 
         concept_id = state["current_concept_id"]
@@ -699,8 +1105,8 @@ class Parcours:
         record = mastery[concept_id]
         attempt = Attempt(
             kind=AttemptType.EXERCISE,
-            score=grade["score"],
-            assistance_coefficient=grade["assistance_coefficient"],
+            score=parsed["score"],
+            assistance_coefficient=parsed["assistance_coefficient"],
             difficulty_coefficient=question["difficulty_coefficient"],
         )
         new_level = update_level_from_attempt(record["current_level"], attempt, eta=self.eta)
@@ -712,7 +1118,17 @@ class Parcours:
             weight=record["weight"],
             concept_label=record["concept_label"],
         )
-        self.store.complete_assessment(assessment_id, raw_score=grade["score"])
+        self.store.complete_assessment(assessment_id, raw_score=parsed["score"])
+        self.store.log_event(
+            self.learner_id,
+            "exercise_submitted",
+            concept_id=concept_id,
+            payload={
+                "question_id": question["question_id"],
+                "score": parsed["score"],
+                "assistance_coefficient": parsed["assistance_coefficient"],
+            },
+        )
 
         current_gap = self._current_gap(state["graph_id"])
         progress = progression(state["initial_gap"], current_gap)
@@ -726,9 +1142,9 @@ class Parcours:
             phase="learning", current_assessment_id=None, current_concept_id=None
         )
         return {
-            "score": grade["score"],
-            "assistance_coefficient": grade["assistance_coefficient"],
-            "feedback": grade["feedback"],
+            "score": parsed["score"],
+            "assistance_coefficient": parsed["assistance_coefficient"],
+            "feedback": parsed["feedback"],
             "level": new_level,
             "gap": current_gap,
             "progress": progress,
@@ -744,14 +1160,16 @@ class Parcours:
             raise ValueError("the parcours is not in the learning phase")
         proposal = self._proposal(state["graph_id"])
         concepts = [self._concept_mapping(concept) for concept in proposal.concepts]
-        passages = self._passages(state["graph_id"])
-        known = self._known_passages(state["graph_id"])
-        exam_data = self.generator.generate_final_exam(
-            concepts, passages, state.get("objectives", ""), state.get("preferences")
-        )
-        questions = parse_assessment(exam_data, known_passages=known)
-        self._validate_question_concepts(
-            questions, {concept.concept_id for concept in proposal.concepts}
+        documents = self._documents(state["graph_id"])
+        known = self._known_documents(state["graph_id"])
+        questions = self._generate_assessment(
+            self.generator.generate_final_exam,
+            concepts,
+            documents,
+            state.get("objectives", ""),
+            state.get("preferences"),
+            known_documents=known,
+            kind="final_exam",
         )
 
         assessment_id = uuid4().hex
@@ -766,9 +1184,16 @@ class Parcours:
         return {"assessment_id": assessment_id, "questions": questions}
 
     def submit_final_exam(
-        self, responses: Sequence[Mapping[str, Any]]
+        self,
+        responses: Sequence[Mapping[str, Any]],
+        grades: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Grade the final exam, re-evaluate the levels and decide sufficiency."""
+        """Grade the final exam, re-evaluate the levels and decide sufficiency.
+
+        ``grades`` maps a question id to the agent's proposal (score,
+        assistance_coefficient, feedback). When it is given it must cover
+        every submitted response, and the generator is not called.
+        """
         state = self._state()
         if state["phase"] != "final_exam":
             raise ValueError("the parcours is not in the final exam phase")
@@ -778,23 +1203,15 @@ class Parcours:
             raise ValueError("final exam not found")
 
         by_question = {question["question_id"]: question for question in assessment["questions"]}
+        self._check_grades(by_question, grades, responses)
         attempts_by_concept: dict[str, list[Attempt]] = {}
         scores: list[float] = []
-        for item in responses:
-            item = _require_mapping(item, "response")
-            question_id = item.get("question_id")
-            response_text = item.get("response_text")
-            if question_id not in by_question:
-                raise ValueError(f"unknown question {question_id!r}")
-            if not isinstance(response_text, str):
-                raise ValueError("response_text must be a string")
-            question = by_question[question_id]
-            grade = parse_grade(
-                self.generator.grade_response(question, response_text)
-            )
+        for question, response_text, grade in self._grade_responses(
+            by_question, responses, grades
+        ):
             self.store.record_response(
                 uuid4().hex,
-                question_id,
+                question["question_id"],
                 response_text,
                 grade["score"],
                 grade["assistance_coefficient"],
@@ -832,6 +1249,14 @@ class Parcours:
 
         self.store.complete_assessment(
             assessment_id, raw_score=mean(scores) if scores else 0.0
+        )
+        self.store.log_event(
+            self.learner_id,
+            "final_exam_submitted",
+            payload={
+                "assessment_id": assessment_id,
+                "raw_score": mean(scores) if scores else 0.0,
+            },
         )
         current_gap = self._current_gap(state["graph_id"])
         progress = progression(state["initial_gap"], current_gap)

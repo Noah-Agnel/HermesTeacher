@@ -17,6 +17,8 @@ from ..tutor.orchestration import Parcours
 from ..tutor.storage import SQLiteStore
 from .config import Settings
 from .generators import make_generator
+from .graphview import layout_graph
+from .jobs import ReportingGenerator
 from .profile import ProfileStore
 
 
@@ -25,13 +27,52 @@ DEFAULT_ETA = 0.3
 DEFAULT_THETA = 0.75
 
 
+
+class EvaluationPending(Exception):
+    """The concept and its graph are saved but the initial evaluation failed."""
+
+    def __init__(self, concept_id: str, message: str) -> None:
+        super().__init__(message)
+        self.concept_id = concept_id
+
 class TutorService:
     """Coordinate the concept registry, storage and the learning engine."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, generator: Any = None) -> None:
         self.settings = settings
         self.profile = ProfileStore(settings.profile_path)
-        self.generator = make_generator(settings)
+        # The proxy reports each generator call to the running background
+        # job (live progress); it delegates everything else unchanged.
+        self.generator = ReportingGenerator(
+            generator if generator is not None else make_generator()
+        )
+
+    def get_profile(self) -> dict[str, Any]:
+        """Return the learner's global profile, with defaults when absent."""
+        profile = self.profile.get_learner_profile(LEARNER_ID)
+        if profile is None:
+            return {
+                "learner_id": LEARNER_ID,
+                "display_name": None,
+                "preferences": {},
+                "weaknesses": [],
+            }
+        return profile
+
+    def save_profile(
+        self,
+        *,
+        display_name: str | None = None,
+        preferences: dict[str, Any] | None = None,
+        weaknesses: list[Any] | None = None,
+    ) -> None:
+        """Persist the learner's global profile."""
+        self.profile.save_learner_profile(
+            LEARNER_ID,
+            display_name=display_name,
+            preferences=preferences,
+            weaknesses=weaknesses,
+        )
 
     # ------------------------------------------------------------------
     # concept registry
@@ -65,11 +106,103 @@ class TutorService:
         concept = self.profile.get_concept(concept_id)
         if concept is None:
             return None
-        return {**concept, **self.summary(concept_id)}
+        merged = {**concept, **self.summary(concept_id)}
+        merged["mini_graph"] = self.mini_graph(merged)
+        return merged
 
     def _decorate(self, concept: dict[str, Any]) -> dict[str, Any]:
         summary = self.summary(concept["concept_id"])
-        return {**concept, **summary}
+        decorated = {**concept, **summary}
+        decorated["mini_graph"] = self.mini_graph(decorated)
+        return decorated
+
+    # ------------------------------------------------------------------
+    # graph views
+    # ------------------------------------------------------------------
+    def graph_view(self, concept_id: str) -> dict[str, Any] | None:
+        """Return the graph with each concept's level and learning status.
+
+        Status: ``mastered`` (level ≥ target), ``current`` (being worked on),
+        ``locked`` (a prerequisite is below the threshold θ) or ``open``.
+        """
+        concept = self.get_concept(concept_id)
+        if concept is None or not concept["graph"]:
+            return None
+        graph = concept["graph"]
+        levels = concept["levels"]
+        theta = concept.get("theta", DEFAULT_THETA)
+        state = concept.get("state") or {}
+        prerequisites: dict[str, list[str]] = {item["concept_id"]: [] for item in graph["concepts"]}
+        for edge in graph["edges"]:
+            if edge["concept_id"] in prerequisites:
+                prerequisites[edge["concept_id"]].append(edge["prerequisite_id"])
+        nodes = []
+        for item in graph["concepts"]:
+            concept_key = item["concept_id"]
+            level = levels.get(concept_key, 0.0)
+            if level >= item["target_level"]:
+                status = "mastered"
+            elif concept_key == state.get("current_concept_id"):
+                status = "current"
+            elif any(levels.get(p, 0.0) < theta for p in prerequisites[concept_key]):
+                status = "locked"
+            else:
+                status = "open"
+            nodes.append(
+                {
+                    "id": concept_key,
+                    "label": item["label"],
+                    "description": item.get("description") or "",
+                    "level": round(level, 3),
+                    "target": item["target_level"],
+                    "status": status,
+                    "prerequisites": prerequisites[concept_key],
+                }
+            )
+        edges = [
+            {"source": edge["prerequisite_id"], "target": edge["concept_id"]}
+            for edge in graph["edges"]
+        ]
+        return {"nodes": nodes, "edges": edges, "theta": theta}
+
+    @staticmethod
+    def mini_graph(concept: dict[str, Any]) -> dict[str, Any] | None:
+        """Small constellation of the graph for tiles and the side rail.
+
+        Positions are normalised to a 100 × 60 box; each node carries a
+        mastery bucket (0–4) for its colour.
+        """
+        graph = concept.get("graph")
+        if not graph or not graph.get("concepts"):
+            return None
+        layout = layout_graph(graph["concepts"], graph["edges"], concept.get("levels", {}))
+        xs = [node["x"] for node in layout["nodes"]]
+        ys = [node["y"] for node in layout["nodes"]]
+        span_x = (max(xs) - min(xs)) or 1
+        span_y = (max(ys) - min(ys)) or 1
+
+        def scale(x: float, y: float) -> tuple[float, float]:
+            return (
+                round(6 + (x - min(xs)) / span_x * 88, 2),
+                round(6 + (y - min(ys)) / span_y * 48, 2) if len(set(ys)) > 1 else 30.0,
+            )
+
+        position = {}
+        nodes = []
+        for node in layout["nodes"]:
+            x, y = scale(node["x"], node["y"])
+            position[node["concept_id"]] = (x, y)
+            nodes.append({"x": x, "y": y, "bucket": min(4, int(node["level"] * 4.999)), "label": node["label"]})
+        edges = [
+            {
+                "x1": position[edge["prerequisite_id"]][0],
+                "y1": position[edge["prerequisite_id"]][1],
+                "x2": position[edge["concept_id"]][0],
+                "y2": position[edge["concept_id"]][1],
+            }
+            for edge in layout["edges"]
+        ]
+        return {"nodes": nodes, "edges": edges}
 
     def create_concept(
         self,
@@ -89,6 +222,7 @@ class TutorService:
 
         store = SQLiteStore(db_path)
         store.create_learner(LEARNER_ID, display_name=title)
+        loaded_documents: list[Any] = []
         try:
             loaded_documents = [
                 self._load_upload(filename, content)
@@ -111,31 +245,60 @@ class TutorService:
                 prerequisite_threshold=theta,
             )
             parcours.start(loaded_documents, objectives, preferences)
-        except Exception:
+        except Exception as error:
+            state = store.get_parcours_state(LEARNER_ID)
+            if state is not None and state.get("graph_id"):
+                # The graph is saved: keep the concept so the evaluation can
+                # be retried from its page without regenerating the graph.
+                raise EvaluationPending(concept_id, str(error)) from error
             db_path.unlink(missing_ok=True)
             self.profile.delete_concept(concept_id)
+            self._remove_uploads([str(document.path) for document in loaded_documents])
             raise
         return concept_id
 
+    def prepare_initial_evaluation(self, concept_id: str) -> dict[str, Any]:
+        """Retry the initial evaluation of a concept whose graph is saved."""
+        return self._parcours(concept_id).prepare_initial_evaluation()
+
     def _load_upload(self, filename: str, content: bytes):
-        suffix = Path(filename).suffix.lower()
-        if suffix not in {".txt", ".md", ".markdown", ".pdf"}:
-            raise ValueError(f"format de document non supporté : {suffix or '(aucun)'}")
         upload_dir = self.settings.data_dir / "uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        path = upload_dir / f"{uuid4().hex}{suffix}"
-        path.write_bytes(content)
         document_id = f"{Path(filename).stem}-{uuid4().hex[:8]}"
-        return documents.load_file(
-            path, document_id=document_id, title=Path(filename).stem
+        return documents.store_upload(
+            upload_dir,
+            document_id=document_id,
+            title=Path(filename).stem,
+            filename=filename,
+            content=content,
         )
 
     def delete_concept(self, concept_id: str) -> None:
+        """Delete a concept: its database, then its deposited files."""
         concept = self.profile.get_concept(concept_id)
         if concept is None:
             raise ValueError("concept not found")
+        paths = []
+        if Path(concept["db_path"]).exists():
+            store = SQLiteStore(concept["db_path"])
+            paths = [document["path"] for document in store.list_documents(LEARNER_ID)]
         Path(concept["db_path"]).unlink(missing_ok=True)
         self.profile.delete_concept(concept_id)
+        self._remove_uploads(paths)
+
+    def _remove_uploads(self, paths: list[str]) -> None:
+        """Delete deposited files (PDF and text companion) inside the upload folder."""
+        upload_dir = (self.settings.data_dir / "uploads").resolve()
+        for raw in paths:
+            pdf = Path(raw)
+            if not pdf.is_absolute():
+                # stored relative to the working directory (e.g. data/uploads/x.pdf)
+                pdf = pdf.resolve()
+            for path in (pdf, documents.text_path(pdf)):
+                try:
+                    if path.resolve().parent == upload_dir:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # progress summary
@@ -242,6 +405,9 @@ class TutorService:
             return {"kind": "not_started"}
         phase = state["phase"]
 
+        if phase == "not_started" and state.get("graph_id"):
+            return {"kind": "evaluation_pending"}
+
         if phase == "initial_evaluation":
             assessment = (
                 store.get_assessment(state["current_assessment_id"])
@@ -313,7 +479,19 @@ class TutorService:
         return self._parcours(concept_id).next_exercise()
 
     def submit_exercise(self, concept_id: str, response_text: str) -> dict[str, Any]:
-        return self._parcours(concept_id).submit_exercise(response_text)
+        """Grade the exercise; the result also carries the level before."""
+        store = self._store(concept_id)
+        state = store.get_parcours_state(LEARNER_ID) if store else None
+        exercise_concept = state.get("current_concept_id") if state else None
+        before = None
+        label = exercise_concept
+        if store is not None and exercise_concept:
+            for item in store.get_mastery(LEARNER_ID):
+                if item["concept_id"] == exercise_concept:
+                    before = item["current_level"]
+                    label = item.get("concept_label") or exercise_concept
+        result = self._parcours(concept_id).submit_exercise(response_text)
+        return {**result, "level_before": before, "concept_label": label}
 
     def start_final_exam(self, concept_id: str) -> dict[str, Any]:
         return self._parcours(concept_id).start_final_exam()
@@ -325,6 +503,10 @@ class TutorService:
 
     def resume_learning(self, concept_id: str) -> dict[str, Any]:
         return self._parcours(concept_id).resume_learning()
+
+    def keep_course(self, concept_id: str, course_id: str) -> None:
+        """Mark a generated course as kept by the learner."""
+        self._parcours(concept_id).keep_course(course_id)
 
     # ------------------------------------------------------------------
     # configuration

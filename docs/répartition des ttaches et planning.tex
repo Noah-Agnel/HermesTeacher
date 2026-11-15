@@ -1,0 +1,199 @@
+\documentclass[11pt, a4paper]{article}
+\usepackage[a4paper, margin=2cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[french]{babel}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,calc}
+
+% Optimisation des espacements pour la mise en page
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+\renewcommand{\arraystretch}{1.15}
+
+\definecolor{primary}{RGB}{30, 58, 138}
+\definecolor{secondary}{RGB}{15, 118, 110}
+\definecolor{accent}{RGB}{217, 119, 6}
+\definecolor{critical}{RGB}{185, 28, 28}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=primary,
+    urlcolor=secondary
+}
+
+\title{\textbf{\Large Projets S7 -- INSA Rouen Normandie (Département GM)}\\[0.3em]
+\Huge \textbf{\color{primary} Planning \& Découpage du Projet : Agent Hermes}\\[0.2em]
+\large Note de cadrage, PERT, Gantt et État d'avancement à l'instant $T_0$}
+
+\author{\textbf{Auteurs :} Adrien FERRU \& Noah AGNEL \quad|\quad \textbf{Encadrant :} Aomar OSMANI}
+\date{Année universitaire 2026--2027}
+
+\begin{document}
+
+\maketitle
+\hrule
+\vspace{0.8em}
+
+\section{Liste Descriptive des Tâches ($\equiv$)}
+
+\begin{description}
+    \item[\textbf{T1. Ingestion \& Parsing RAG :}] Extraction et découpage des documents PDF/images déposés par l'apprenant. Indexation dans la base vectorielle.
+    \item[\textbf{T2. Extraction du DAG \& Cycles :}] Construction automatique du graphe de prérequis $G=(C,R)$ et détection/correction des cycles.
+    \item[\textbf{T3. Moteur Mathématique :}] Codage du calcul d'écart $\Delta(k,k^*)$, de la progression, de l'actualisation de $k_c$ et des distances ($D_{KL}, W_1$).
+    \item[\textbf{T4. Évaluation Initiale \& Diagnostic :}] Génération de tests et calcul du profil de niveau initial $k(0)$.
+    \item[\textbf{T5. Agent Hermes (Cours/Exercices RAG) :}] Génération de mini-cours et d'exercices ancrés dans les documents avec citation des sources.
+    \item[\textbf{T6. Mémoire Persistante \& SQLite :}] Sauvegarde des sessions, suivi des erreurs et répétition espacée du parcours.
+    \item[\textbf{T7. Interface Web (Streamlit/Gradio) :}] Déploiement de l'UI (dépôt PDF, affichage du graphe, barre de progression).
+    \item[\textbf{T8. Options \& Fonctions BNF :}] Intégration des pop-ups d'intérêt (BNF1), félicitations (BNF2) et contestation du niveau.
+    \item[\textbf{T9. Campagne de Tests \& Validation :}] Réalisation du protocole de tests utilisateurs, mesure du gain et rédaction de la matrice de conformité.
+\end{description}
+
+\section{Échéancier façon PERT (Tableau avec Antériorités)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{c X c c X}
+\toprule
+\textbf{Code} & \textbf{Intitulé de la Tâche} & \textbf{Durée (j)} & \textbf{Antériorités} & \textbf{Justification de la contrainte} \\
+\midrule
+\textbf{T1} & Ingestion \& Parsing RAG & 20 & Aucune & Socle technique préalable au traitement. \\
+\textbf{T2} & Extraction DAG \& Cycles & 16 & T1 & Nécessite le texte extrait des documents. \\
+\textbf{T3} & Moteur Mathématique & 16 & Aucune & Indépendant de l'IA, fondement théorique. \\
+\textbf{T4} & Évaluation Initiale & 12 & T2, T3 & Requiert le DAG validé et les formules d'écart. \\
+\textbf{T5} & Agent Hermes (Cours/Exo) & 24 & T1 & Dépend uniquement des documents indexés (parallélisable avec T2--T4). \\
+\textbf{T6} & Mémoire Persistante & 12 & T3 & Nécessite la structure des données du profil $k_c$. \\
+\textbf{T7} & Interface Web UI & 20 & T2, T3 & Besoin des visualisations du graphe et des métriques. \\
+\textbf{T8} & Fonctions Optionnelles & 8 & T5, T7 & S'ajoute sur l'agent et l'UI fonctionnels. \\
+\textbf{T9} & Tests \& Conformité & 16 & T4, T5, T6, T7, T8 & Exige un prototype complet intégrant l'ensemble des modules. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Diagramme PERT \& Chemin Critique (DAPT / DAPT)}
+
+\begin{itemize}
+    \item \textbf{DAPT :} Date Au Plus Tôt / Date Au Plus Tard (en jours ouvrés).
+    \item \textbf{\color{critical}Chemin Critique :} \textbf{T1 $\rightarrow$ T2 $\rightarrow$ T7 $\rightarrow$ T8 $\rightarrow$ T9} (Durée minimale totale du projet = \textbf{80 jours}).
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.6cm and 2.1cm,
+    every node/.style={font=\sffamily\footnotesize},
+    etape/.style={circle, draw=primary, fill=primary!8, thick, minimum size=1.35cm, align=center},
+    crit/.style={circle, draw=critical, fill=critical!10, very thick, minimum size=1.35cm, align=center},
+    arc/.style={->, >=stealth, thick, draw=black!75},
+    arc_crit/.style={->, >=stealth, very thick, draw=critical},
+    fict/.style={->, >=stealth, dashed, draw=black!55}
+]
+    % Chemin critique en haut (E0 -> E1 -> E3 -> E5 -> E6 -> E7)
+    \node[crit] (E0) {\textbf{E0}\\0 \,|\, 0};
+    \node[crit, right=of E0] (E1) {\textbf{E1}\\20 \,|\, 20};
+    \node[crit, right=of E1] (E3) {\textbf{E3}\\36 \,|\, 36};
+    \node[crit, right=of E3] (E5) {\textbf{E5}\\56 \,|\, 56};
+    \node[crit, right=of E5] (E6) {\textbf{E6}\\64 \,|\, 64};
+    \node[crit, right=of E6] (E7) {\textbf{E7}\\80 \,|\, 80};
+
+    % Noeud intermédiaire en bas (E2)
+    \node[etape, below=1.8cm of E1] (E2) {\textbf{E2}\\16 \,|\, 36};
+
+    % Arcs critiques
+    \draw[arc_crit] (E0) -- node[above] {\textbf{\color{critical}T1 (20j)}} (E1);
+    \draw[arc_crit] (E1) -- node[above] {\textbf{\color{critical}T2 (16j)}} (E3);
+    \draw[arc_crit] (E3) -- node[above] {\textbf{\color{critical}T7 (20j)}} (E5);
+    \draw[arc_crit] (E5) -- node[above] {\textbf{\color{critical}T8 (8j)}} (E6);
+    \draw[arc_crit] (E6) -- node[above] {\textbf{\color{critical}T9 (16j)}} (E7);
+
+    % Arcs non-critiques
+    \draw[arc] (E0) |- node[below, pos=0.75] {T3 (16j)} (E2);
+    \draw[fict] (E2) -- node[left, pos=0.55] {fict. (0j)} (E3);
+    \draw[arc] (E1) to[bend left=38] node[above] {T5 (24j)} (E5);
+    \draw[arc] (E3) to[bend right=25] node[below] {T4 (12j)} (E6);
+    \draw[arc] (E2) to[bend right=25] node[below] {T6 (12j)} (E6);
+\end{tikzpicture}%
+}
+\caption{Réseau PERT corrigé (Chemin critique en rouge : 80 jours ; format \textit{Date au plus tôt $|$ Date au plus tard}).}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Tâche} & \textbf{Début au plus tôt} & \textbf{Début au plus tard} & \textbf{Marge Totale (j)} & \textbf{Statut} \\
+\midrule
+\textbf{T1} & 0 & 0 & 0 & \textbf{\color{critical}Critique} \\
+\textbf{T2} & 20 & 20 & 0 & \textbf{\color{critical}Critique} \\
+\textbf{T3} & 0 & 20 & 20 & Libre \\
+\textbf{T4} & 36 & 52 & 16 & Libre \\
+\textbf{T5} & 20 & 32 & 12 & Libre \\
+\textbf{T6} & 16 & 52 & 36 & Libre \\
+\textbf{T7} & 36 & 36 & 0 & \textbf{\color{critical}Critique} \\
+\textbf{T8} & 56 & 56 & 0 & \textbf{\color{critical}Critique} \\
+\textbf{T9} & 64 & 64 & 0 & \textbf{\color{critical}Critique} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Planning synthétique type GANTT (Jalons, Marges, Avancement)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l c c c c l}
+\toprule
+\textbf{Tâche / Jalon} & \textbf{Lien} & \textbf{Durée} & \textbf{Marge} & \textbf{Avancement} & \textbf{Rôle / Responsable} \\
+\midrule
+\textbf{Jalon 1 : Cadrage validé} & -- & 0 j & 0 j & 100 \% & Validation sujet \& CDC \\
+T1. Parsing RAG & -- & 20 j & 0 j & 50 \% & Adrien (IA) \\
+T2. Extraction DAG & T1 & 16 j & 0 j & 75 \% & Noah (Algorithmes) \\
+T3. Moteur Math & -- & 16 j & 20 j & 90 \% & Noah (Algorithmes) \\
+\textbf{Jalon 2 : Socle Algorithmique} & T2, T3 & 0 j & 0 j & 82 \% & Validation du DAG \& de $\Delta$ \\
+T4. Évaluation Initiale & T2, T3 & 12 j & 16 j & 90 \% & Adrien (IA) \\
+T5. Agent Hermes (RAG) & T1 & 24 j & 12 j & 30 \% & Adrien (IA) \\
+T6. Mémoire SQLite & T3 & 12 j & 36 j & 100 \% & Adrien (Backend) \\
+T7. Interface UI & T2, T3 & 20 j & 0 j & 100 \% & Noah (UI) \\
+T8. Fonctions Optionnelles & T5, T7 & 8 j & 0 j & 0 \% & Noah (UI) \\
+\textbf{Jalon 3 : POC Fonctionnelle} & T5, T7 & 0 j & 0 j & 65 \% & Intégration globale \\
+T9. Tests \& Conformité & T4--T8 & 16 j & 0 j & 0 \% & Adrien \& Noah \\
+\textbf{Jalon 4 : Soutenance Finale} & T9 & 0 j & 0 j & 0 \% & Livrables \& Rapport \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Présentation de l'État Réel du Projet (à l'Instant $T_0$)}
+
+\textit{Note : Présentation de l'état réel actuel des travaux (pas de projections futures fictives).}
+
+\begin{itemize}
+    \item \textbf{Tâches finalisées ou quasi-finalisées à $T_0$ :}
+    \begin{itemize}
+        \item \textbf{Cadrage \& CDC (100 \%) :} Rédaction du cahier des charges complète (INSA S7).
+        \item \textbf{Tâche 6 -- Mémoire Persistante \& SQLite (100 \%) :} Base de données opérationnelle pour le suivi des sessions, des erreurs et la répétition espacée.
+        \item \textbf{Tâche 7 -- Interface Web UI (100 \%) :} Interface Streamlit finalisée (dépôt de documents, visualisation du graphe, barre de progression).
+        \item \textbf{Tâche 3 -- Moteur Mathématique (90 \%) :} Implémentation en Python des fonctions de calcul d'écart $\Delta(k, k^*)$, de la progression dynamique et des métriques de distance ($D_{KL}$, $W_1$).
+        \item \textbf{Tâche 4 -- Évaluation Initiale \& Diagnostic (90 \%) :} Module de génération des tests initiaux et d'estimation du niveau $k(0)$ fonctionnel.
+    \end{itemize}
+    \item \textbf{Tâches en cours à $T_0$ :}
+    \begin{itemize}
+        \item \textbf{Tâche 2 -- Extraction DAG \& Cycles (75 \%) :} Construction du graphe de prérequis $G=(C,R)$ avancée ; finalisation de la détection/correction des cycles.
+        \item \textbf{Tâche 1 -- Ingestion \& Parsing RAG (50 \%) :} Pipeline d'extraction de texte PDF et d'indexation vectorielle en cours de finalisation.
+        \item \textbf{Tâche 5 -- Agent Hermes (Cours/Exercices RAG) (30 \%) :} Génération initiale des mini-cours amorcée ; la génération adaptative des exercices avec citation fine des sources est en cours de développement.
+    \end{itemize}
+    \item \textbf{Point de vigilance actuel :} \textbf{T1} (50 \%) et \textbf{T2} (75 \%) se situent sur le chemin critique \textbf{T1 $\rightarrow$ T2 $\rightarrow$ T7 $\rightarrow$ T8 $\rightarrow$ T9} ; leur achèvement est prioritaire pour valider l'intégration complète des données dans l'UI (T7) et l'agent (T5, qui dispose de 12 jours de marge).
+\end{itemize}
+
+\end{document}

@@ -82,19 +82,28 @@ CREATE TABLE IF NOT EXISTS documents (
     document_id TEXT PRIMARY KEY CHECK(length(trim(document_id)) > 0),
     learner_id TEXT NOT NULL REFERENCES learners(learner_id) ON DELETE CASCADE,
     title TEXT NOT NULL,
-    source TEXT NOT NULL,
+    path TEXT NOT NULL,
     media_type TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS passages (
-    passage_id TEXT PRIMARY KEY CHECK(length(trim(passage_id)) > 0),
-    document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-    page INTEGER,
-    heading TEXT,
-    text TEXT NOT NULL,
-    UNIQUE(document_id, ordinal)
+CREATE TABLE IF NOT EXISTS errors (
+    error_id TEXT PRIMARY KEY CHECK(length(trim(error_id)) > 0),
+    learner_id TEXT NOT NULL REFERENCES learners(learner_id) ON DELETE CASCADE,
+    concept_id TEXT NOT NULL CHECK(length(trim(concept_id)) > 0),
+    description TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    occurred_at TEXT NOT NULL,
+    resolved_at TEXT,
+    UNIQUE(error_id, learner_id)
+);
+CREATE TABLE IF NOT EXISTS history_events (
+    event_id TEXT PRIMARY KEY CHECK(length(trim(event_id)) > 0),
+    learner_id TEXT NOT NULL REFERENCES learners(learner_id) ON DELETE CASCADE,
+    concept_id TEXT,
+    kind TEXT NOT NULL CHECK(length(trim(kind)) > 0),
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS concept_graphs (
     graph_id TEXT PRIMARY KEY CHECK(length(trim(graph_id)) > 0),
@@ -129,6 +138,7 @@ CREATE TABLE IF NOT EXISTS courses (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     citations_json TEXT NOT NULL DEFAULT '[]',
+    saved INTEGER NOT NULL DEFAULT 0 CHECK(saved IN (0, 1)),
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS parcours_state (
@@ -173,6 +183,53 @@ class SQLiteStore:
     def initialize(self) -> None:
         with self._connection() as connection:
             connection.executescript(_SCHEMA)
+            self._migrate(connection)
+
+    @staticmethod
+    def _migrate(connection) -> None:
+        """Bring an older database up to the current schema.
+
+        The prototype evolves quickly; this only handles the changes that
+        affect existing databases. A database created before a change is
+        migrated in place when possible, otherwise it must be recreated.
+        """
+        document_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if document_columns and "path" not in document_columns:
+            connection.execute("ALTER TABLE documents RENAME TO documents_v1")
+            connection.execute(
+                """CREATE TABLE documents (
+                       document_id TEXT PRIMARY KEY CHECK(length(trim(document_id)) > 0),
+                       learner_id TEXT NOT NULL REFERENCES learners(learner_id)
+                           ON DELETE CASCADE,
+                       title TEXT NOT NULL,
+                       path TEXT NOT NULL,
+                       media_type TEXT NOT NULL,
+                       metadata_json TEXT NOT NULL DEFAULT '{}',
+                       created_at TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                """INSERT INTO documents
+                   (document_id, learner_id, title, path, media_type,
+                    metadata_json, created_at)
+                   SELECT document_id, learner_id, title, source, media_type,
+                          metadata_json, created_at
+                   FROM documents_v1"""
+            )
+            connection.execute("DROP TABLE documents_v1")
+            connection.execute("DROP TABLE IF EXISTS passages")
+
+        course_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(courses)").fetchall()
+        }
+        if course_columns and "saved" not in course_columns:
+            connection.execute(
+                "ALTER TABLE courses ADD COLUMN saved INTEGER NOT NULL DEFAULT 0"
+            )
 
     @staticmethod
     def _now() -> str:
@@ -211,16 +268,17 @@ class SQLiteStore:
             if not isinstance(item, Mapping):
                 raise ValueError("each citation must be a mapping")
             document_id = item.get("document_id")
-            passage_id = item.get("passage_id")
+            page = item.get("page")
             quote = item.get("quote")
             if not isinstance(document_id, str) or not document_id.strip():
                 raise ValueError("citation document_id must be a non-empty string")
-            if not isinstance(passage_id, str) or not passage_id.strip():
-                raise ValueError("citation passage_id must be a non-empty string")
+            if page is not None:
+                if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+                    raise ValueError("citation page must be a positive integer or None")
             if quote is not None and not isinstance(quote, str):
                 raise ValueError("citation quote must be a string or None")
             encoded.append(
-                {"document_id": document_id, "passage_id": passage_id, "quote": quote}
+                {"document_id": document_id, "page": page, "quote": quote}
             )
         return json.dumps(encoded, ensure_ascii=False)
 
@@ -494,6 +552,134 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # ------------------------------------------------------------------
+    # errors made by the learner
+    # ------------------------------------------------------------------
+    def record_error(
+        self,
+        learner_id: str,
+        concept_id: str,
+        description: str,
+        source: str = "",
+    ) -> str:
+        """Record an error the learner made, always tied to a concept."""
+        self._validate_identifier(learner_id, "learner_id")
+        self._validate_identifier(concept_id, "concept_id")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("description must be a non-empty string")
+        if not isinstance(source, str):
+            raise ValueError("source must be a string")
+        error_id = uuid4().hex
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO errors
+                   (error_id, learner_id, concept_id, description, source,
+                    occurred_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    error_id,
+                    learner_id,
+                    concept_id,
+                    description,
+                    source,
+                    self._now(),
+                ),
+            )
+        return error_id
+
+    def list_errors(
+        self,
+        learner_id: str,
+        concept_id: str | None = None,
+        *,
+        resolved: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """List errors, optionally filtered by concept and resolution state."""
+        query = "SELECT * FROM errors WHERE learner_id = ?"
+        parameters: list[Any] = [learner_id]
+        if concept_id is not None:
+            self._validate_identifier(concept_id, "concept_id")
+            query += " AND concept_id = ?"
+            parameters.append(concept_id)
+        if resolved is True:
+            query += " AND resolved_at IS NOT NULL"
+        elif resolved is False:
+            query += " AND resolved_at IS NULL"
+        query += " ORDER BY occurred_at, error_id"
+        with self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolve_error(self, learner_id: str, error_id: str) -> None:
+        """Mark an error as addressed by the learner."""
+        self._validate_identifier(learner_id, "learner_id")
+        self._validate_identifier(error_id, "error_id")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE errors SET resolved_at = ?
+                   WHERE error_id = ? AND learner_id = ? AND resolved_at IS NULL""",
+                (self._now(), error_id, learner_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("error does not exist or is already resolved")
+
+    # ------------------------------------------------------------------
+    # history of the learner's work
+    # ------------------------------------------------------------------
+    def log_event(
+        self,
+        learner_id: str,
+        kind: str,
+        concept_id: str | None = None,
+        payload: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Append one event to the learner's work history.
+
+        ``kind`` is a stable label such as ``document_deposited``,
+        ``course_read``, ``exercise_submitted`` or ``error_recorded``.
+        """
+        self._validate_identifier(learner_id, "learner_id")
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError("kind must be a non-empty string")
+        if concept_id is not None:
+            self._validate_identifier(concept_id, "concept_id")
+        event_id = uuid4().hex
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO history_events
+                   (event_id, learner_id, concept_id, kind, payload_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    learner_id,
+                    concept_id,
+                    kind,
+                    self._encode_json_object(payload, "payload"),
+                    self._now(),
+                ),
+            )
+        return event_id
+
+    def list_history(
+        self, learner_id: str, concept_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return the learner's work history, oldest first."""
+        query = "SELECT * FROM history_events WHERE learner_id = ?"
+        parameters: list[Any] = [learner_id]
+        if concept_id is not None:
+            self._validate_identifier(concept_id, "concept_id")
+            query += " AND concept_id = ?"
+            parameters.append(concept_id)
+        query += " ORDER BY created_at, event_id"
+        with self._connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        events = []
+        for row in rows:
+            event = dict(row)
+            event["payload"] = json.loads(event.pop("payload_json"))
+            events.append(event)
+        return events
+
     def record_progress(
         self,
         learner_id: str,
@@ -544,7 +730,11 @@ class SQLiteStore:
         return [dict(row) for row in rows]
 
     def save_document(self, learner_id: str, document: Document) -> None:
-        """Insert or replace a document and its passages."""
+        """Insert or replace a deposited document's metadata.
+
+        The file itself is already on disk; only its location and metadata are
+        recorded here. No passage is created: the agent reads the file.
+        """
         self._validate_identifier(learner_id, "learner_id")
         if not isinstance(document, Document):
             raise ValueError("document must be a Document")
@@ -558,42 +748,25 @@ class SQLiteStore:
                 raise ValueError("document belongs to another learner")
             connection.execute(
                 """INSERT INTO documents
-                   (document_id, learner_id, title, source, media_type,
+                   (document_id, learner_id, title, path, media_type,
                     metadata_json, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(document_id) DO UPDATE SET
                        learner_id = excluded.learner_id,
                        title = excluded.title,
-                       source = excluded.source,
+                       path = excluded.path,
                        media_type = excluded.media_type,
                        metadata_json = excluded.metadata_json""",
                 (
                     document.document_id,
                     learner_id,
                     document.title,
-                    document.source,
+                    document.path,
                     document.media_type,
                     self._encode_json_object(dict(document.metadata), "metadata"),
                     now,
                 ),
             )
-            connection.execute(
-                "DELETE FROM passages WHERE document_id = ?", (document.document_id,)
-            )
-            for passage in document.passages:
-                connection.execute(
-                    """INSERT INTO passages
-                       (passage_id, document_id, ordinal, page, heading, text)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        passage.passage_id,
-                        document.document_id,
-                        passage.ordinal,
-                        passage.page,
-                        passage.heading,
-                        passage.text,
-                    ),
-                )
 
     def get_document(self, learner_id: str, document_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:
@@ -605,26 +778,14 @@ class SQLiteStore:
                 return None
             document = dict(row)
             document["metadata"] = json.loads(document.pop("metadata_json"))
-            document["passages"] = [
-                dict(passage_row)
-                for passage_row in connection.execute(
-                    """SELECT passage_id, document_id, ordinal, page, heading, text
-                       FROM passages WHERE document_id = ? ORDER BY ordinal""",
-                    (document_id,),
-                ).fetchall()
-            ]
             return document
 
     def list_documents(self, learner_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT d.document_id, d.title, d.source, d.media_type,
-                          d.created_at, COUNT(p.passage_id) AS passage_count
-                   FROM documents AS d
-                   LEFT JOIN passages AS p ON p.document_id = d.document_id
-                   WHERE d.learner_id = ?
-                   GROUP BY d.document_id
-                   ORDER BY d.created_at, d.document_id""",
+                """SELECT document_id, title, path, media_type, created_at
+                   FROM documents WHERE learner_id = ?
+                   ORDER BY created_at, document_id""",
                 (learner_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -779,8 +940,13 @@ class SQLiteStore:
         title: str,
         content: str = "",
         citations: list[Mapping[str, Any]] | None = None,
+        saved: bool = False,
     ) -> None:
-        """Insert or replace a generated mini-course."""
+        """Insert or replace a generated mini-course.
+
+        ``saved`` marks a course the learner chose to keep; unsaved courses are
+        deleted once the learner moves on to the next exercise.
+        """
         self._validate_identifier(learner_id, "learner_id")
         self._validate_identifier(course_id, "course_id")
         self._validate_identifier(concept_id, "concept_id")
@@ -788,18 +954,21 @@ class SQLiteStore:
             raise ValueError("title must be a non-empty string")
         if not isinstance(content, str):
             raise ValueError("content must be a string")
+        if not isinstance(saved, bool):
+            raise ValueError("saved must be a boolean")
         with self._connection() as connection:
             connection.execute(
                 """INSERT INTO courses
                    (course_id, learner_id, concept_id, title, content,
-                    citations_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                    citations_json, saved, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(course_id) DO UPDATE SET
                        learner_id = excluded.learner_id,
                        concept_id = excluded.concept_id,
                        title = excluded.title,
                        content = excluded.content,
-                       citations_json = excluded.citations_json""",
+                       citations_json = excluded.citations_json,
+                       saved = excluded.saved""",
                 (
                     course_id,
                     learner_id,
@@ -807,6 +976,7 @@ class SQLiteStore:
                     title,
                     content,
                     self._encode_citations(citations),
+                    1 if saved else 0,
                     self._now(),
                 ),
             )
@@ -821,6 +991,7 @@ class SQLiteStore:
                 return None
             course = dict(row)
             course["citations"] = json.loads(course.pop("citations_json"))
+            course["saved"] = bool(course.get("saved", 0))
             return course
 
     def list_courses(
@@ -828,7 +999,7 @@ class SQLiteStore:
     ) -> list[dict[str, Any]]:
         with self._connection() as connection:
             query = (
-                """SELECT course_id, learner_id, concept_id, title, created_at
+                """SELECT course_id, learner_id, concept_id, title, saved, created_at
                    FROM courses WHERE learner_id = ?"""
             )
             parameters: list[Any] = [learner_id]
@@ -837,7 +1008,41 @@ class SQLiteStore:
                 parameters.append(concept_id)
             query += " ORDER BY created_at, course_id"
             rows = connection.execute(query, parameters).fetchall()
-        return [dict(row) for row in rows]
+        courses = []
+        for row in rows:
+            course = dict(row)
+            course["saved"] = bool(course.get("saved", 0))
+            courses.append(course)
+        return courses
+
+    def set_course_saved(
+        self, learner_id: str, course_id: str, saved: bool
+    ) -> None:
+        """Mark a generated course as kept by the learner, or not."""
+        self._validate_identifier(learner_id, "learner_id")
+        self._validate_identifier(course_id, "course_id")
+        if not isinstance(saved, bool):
+            raise ValueError("saved must be a boolean")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """UPDATE courses SET saved = ?
+                   WHERE course_id = ? AND learner_id = ?""",
+                (1 if saved else 0, course_id, learner_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("course does not exist for this learner")
+
+    def delete_course(self, learner_id: str, course_id: str) -> None:
+        """Delete a generated course that the learner did not keep."""
+        self._validate_identifier(learner_id, "learner_id")
+        self._validate_identifier(course_id, "course_id")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM courses WHERE course_id = ? AND learner_id = ?",
+                (course_id, learner_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("course does not exist for this learner")
 
     def save_parcours_state(
         self,

@@ -7,131 +7,135 @@ try:
 except ImportError:
     documents = None
 
-try:
-    import pypdf  # noqa: F401
-    import reportlab  # noqa: F401
 
-    PDF_AVAILABLE = True
-except ImportError:
-    PDF_AVAILABLE = False
-
-
-class TextDocumentTests(unittest.TestCase):
+class DocumentStorageTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(documents, "documents module should be implemented")
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.upload_dir = Path(self.temporary_directory.name) / "uploads"
 
-    def test_load_text_splits_paragraphs_and_assigns_ordinals(self):
-        text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
-        document = documents.load_text(text, document_id="doc-1", title="Cours")
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def test_store_upload_writes_the_file_and_returns_its_record(self):
+        document = documents.store_upload(
+            self.upload_dir,
+            document_id="doc-1",
+            title="Cours",
+            filename="cours.pdf",
+            content=b"%PDF-1.4 fake",
+        )
 
         self.assertEqual(document.document_id, "doc-1")
         self.assertEqual(document.title, "Cours")
-        self.assertEqual(document.media_type, "text/plain")
-        self.assertEqual([p.ordinal for p in document.passages], [0, 1, 2])
-        self.assertEqual(
-            [p.text for p in document.passages],
-            ["First paragraph.", "Second paragraph.", "Third paragraph."],
-        )
-        self.assertEqual(
-            [p.passage_id for p in document.passages],
-            ["doc-1:0000", "doc-1:0001", "doc-1:0002"],
-        )
+        self.assertEqual(document.media_type, "application/pdf")
+        self.assertTrue(Path(document.path).exists())
+        self.assertEqual(Path(document.path).read_bytes(), b"%PDF-1.4 fake")
 
-    def test_load_text_uses_headings_for_markdown(self):
-        text = "# Titre\n\nIntro.\n\n## Section A\n\nContenu A.\n\n## Section B\n\nContenu B."
-        document = documents.load_text(
-            text, document_id="doc-1", media_type="text/markdown"
-        )
-
-        self.assertEqual(
-            [p.heading for p in document.passages],
-            ["Titre", "Section A", "Section B"],
-        )
-        self.assertEqual(len(document.passages), 3)
-
-    def test_load_text_splits_long_blocks(self):
-        text = "a" * 500 + "\n\n" + "b" * 500
-        document = documents.load_text(text, document_id="doc-1", max_chars=400)
-
-        self.assertGreater(len(document.passages), 2)
-        for passage in document.passages:
-            self.assertLessEqual(len(passage.text), 400)
-
-    def test_load_text_rejects_empty_text(self):
+    def test_store_upload_rejects_unsupported_format(self):
         with self.assertRaises(ValueError):
-            documents.load_text("   \n  ", document_id="doc-1")
+            documents.store_upload(
+                self.upload_dir,
+                document_id="doc-1",
+                title="Image",
+                filename="image.png",
+                content=b"not a pdf",
+            )
 
-    def test_load_text_defaults_title_to_document_id(self):
-        document = documents.load_text("Hello.", document_id="doc-1")
+    def test_store_upload_rejects_invalid_document_id(self):
+        with self.assertRaises(ValueError):
+            documents.store_upload(
+                self.upload_dir,
+                document_id="",
+                title="Cours",
+                filename="cours.pdf",
+                content=b"%PDF-1.4 fake",
+            )
 
-        self.assertEqual(document.title, "doc-1")
-
-    def test_load_text_keeps_metadata(self):
-        document = documents.load_text(
-            "Hello.", document_id="doc-1", metadata={"author": "X"}
+    def test_store_upload_uses_the_document_id_as_filename(self):
+        document = documents.store_upload(
+            self.upload_dir,
+            document_id="doc-1",
+            title="Cours",
+            filename="cours.pdf",
+            content=b"%PDF-1.4 fake",
         )
 
-        self.assertEqual(document.metadata["author"], "X")
-
-    def test_load_file_dispatches_text_and_markdown(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            text_file = directory / "note.txt"
-            text_file.write_text("Hello paragraph.", encoding="utf-8")
-            markdown_file = directory / "cours.md"
-            markdown_file.write_text("# Titre\n\nContenu.", encoding="utf-8")
-
-            text_document = documents.load_file(text_file, document_id="doc-1")
-            markdown_document = documents.load_file(markdown_file, document_id="doc-2")
-
-            self.assertEqual(text_document.media_type, "text/plain")
-            self.assertEqual(markdown_document.media_type, "text/markdown")
-            self.assertEqual(markdown_document.passages[0].heading, "Titre")
-
-    def test_load_file_rejects_unknown_extension(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "file.docx"
-            path.write_text("x", encoding="utf-8")
-
-            with self.assertRaises(ValueError):
-                documents.load_file(path, document_id="doc-1")
+        self.assertEqual(Path(document.path).name, "doc-1.pdf")
 
 
-@unittest.skipUnless(PDF_AVAILABLE, "pypdf and reportlab required for PDF tests")
-class PdfDocumentTests(unittest.TestCase):
+def _make_pdf(path: Path, pages: list[str]) -> None:
+    import pymupdf
+
+    pdf = pymupdf.open()
+    for text in pages:
+        page = pdf.new_page()
+        page.insert_text((72, 72), text)
+    pdf.save(str(path))
+    pdf.close()
+
+
+class DocumentTextTests(unittest.TestCase):
     def setUp(self):
-        self.assertIsNotNone(documents, "documents module should be implemented")
+        try:
+            import pymupdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pymupdf is not installed")
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.upload_dir = Path(self.temporary_directory.name) / "uploads"
+        self.upload_dir.mkdir()
 
-    @staticmethod
-    def _write_pdf(path, pages):
-        from reportlab.pdfgen import canvas
+    def tearDown(self):
+        self.temporary_directory.cleanup()
 
-        canvas_object = canvas.Canvas(str(path))
-        for lines in pages:
-            for index, line in enumerate(lines):
-                canvas_object.drawString(72, 720 - index * 20, line)
-            canvas_object.showPage()
-        canvas_object.save()
+    def test_upload_creates_a_text_companion_with_page_markers(self):
+        source = self.upload_dir / "source.pdf"
+        _make_pdf(source, ["Chaines de Markov", "Matrice de transition"])
 
-    def test_load_pdf_extracts_pages(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "cours.pdf"
-            self._write_pdf(path, [["Page one text."], ["Page two text."]])
+        document = documents.store_upload(
+            self.upload_dir,
+            document_id="doc-1",
+            title="Cours",
+            filename="cours.pdf",
+            content=source.read_bytes(),
+        )
 
-            document = documents.load_pdf(path, document_id="doc-1")
+        text_file = documents.text_path(document.path)
+        self.assertEqual(text_file.name, "doc-1.txt")
+        text = text_file.read_text(encoding="utf-8")
+        self.assertIn("=== Page 1 ===", text)
+        self.assertIn("Chaines de Markov", text)
+        self.assertIn("=== Page 2 ===", text)
+        self.assertIn("Matrice de transition", text)
 
-            self.assertEqual(document.media_type, "application/pdf")
-            self.assertEqual([p.page for p in document.passages], [1, 2])
-            self.assertIn("Page one text.", document.passages[0].text)
-            self.assertIn("Page two text.", document.passages[1].text)
+    def test_a_broken_pdf_is_still_stored(self):
+        document = documents.store_upload(
+            self.upload_dir,
+            document_id="doc-1",
+            title="Cours",
+            filename="cours.pdf",
+            content=b"%PDF-1.4 fake",
+        )
 
-    def test_load_pdf_rejects_document_without_text_layer(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "scanned.pdf"
-            self._write_pdf(path, [[]])
+        self.assertTrue(Path(document.path).exists())
+        self.assertIsNone(documents.read_text(document.path))
 
-            with self.assertRaises(ValueError):
-                documents.load_pdf(path, document_id="doc-1")
+    def test_read_text_converts_older_uploads_on_demand(self):
+        pdf = self.upload_dir / "old.pdf"
+        _make_pdf(pdf, ["Ancien depot"])
+
+        self.assertIn("Ancien depot", documents.read_text(pdf))
+        self.assertTrue(documents.text_path(pdf).exists())
+
+    def test_control_characters_never_reach_the_text(self):
+        pdf = self.upload_dir / "old.pdf"
+        _make_pdf(pdf, ["Cours"])
+        documents.text_path(pdf).write_text("a\x00b\x0cc\nd", encoding="utf-8")
+
+        self.assertEqual(documents.read_text(pdf), "a b c\nd")
+
+    def test_latex_accents_are_composed(self):
+        self.assertEqual(documents._fix_accents("probabilit´e `a"), "probabilité à")
 
 
 if __name__ == "__main__":

@@ -1,245 +1,201 @@
-"""Document loading and chunking.
+"""Deposited document storage and text conversion.
 
-A document is split into ordered passages. Each passage has a stable id and,
-for PDFs, a page number, so a concept graph can cite the exact passage that
-supports a concept or a prerequisite relation.
+The backend stores the learner's files as-is and records their location. At
+upload it also converts each PDF once into a plain-text companion file
+(``{document_id}.txt`` next to the PDF) with one ``=== Page N ===`` marker per
+page, so the agent can receive the whole course in its prompt instead of
+reading the PDF piece by piece with its tools (one model call instead of
+dozens).
 
-Only plain text, Markdown and PDF are supported. PDF extraction uses pypdf,
-which is an optional dependency: `pip install pypdf`.
+The conversion keeps the mathematics readable: LaTeX-generated PDFs draw big
+operators (∑, ∫, ⋂, ∏ ...) with the ``cmex`` font, whose glyphs extract as
+plain letters (``P``, ``Z``, ``T`` ...); they are mapped back to Unicode, as
+are blackboard letters (ℝ, ℕ, ℙ ...), calligraphic letters (ℱ, ℰ ...), LaTeX accents (``´e`` → ``é``) and
+sub/superscripts (``X_{n}``, ``x^{2}``). Fraction bars and operator limits
+stay on separate lines, as in the PDF layout.
+
+The agent still cites documents by id, with a page and a quote.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
-from typing import Any
+from typing import Any, Mapping
 
-DEFAULT_MAX_PASSAGE_CHARS = 2000
-
-_HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
-_WHITESPACE_PATTERN = re.compile(r"[ \t\f\v]+")
-_BLANK_LINE_PATTERN = re.compile(r"\n\s*\n")
-
-_EXTENSION_MEDIA_TYPES = {
-    ".txt": "text/plain",
-    ".md": "text/markdown",
-    ".markdown": "text/markdown",
-    ".pdf": "application/pdf",
-}
-
-
-@dataclass(frozen=True)
-class Passage:
-    """A chunk of a document, citable as evidence."""
-
-    passage_id: str
-    document_id: str
-    ordinal: int
-    text: str
-    page: int | None = None
-    heading: str | None = None
+SUPPORTED_MEDIA_TYPES = {".pdf": "application/pdf"}
+TEXT_SUFFIX = ".txt"
 
 
 @dataclass(frozen=True)
 class Document:
-    """A loaded document and its ordered passages."""
+    """A deposited file stored as-is, with its metadata."""
 
     document_id: str
     title: str
-    source: str
+    path: str
     media_type: str
-    passages: tuple[Passage, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _passage_id(document_id: str, ordinal: int) -> str:
-    return f"{document_id}:{ordinal:04d}"
-
-
-def _clean(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [_WHITESPACE_PATTERN.sub(" ", line).strip() for line in text.split("\n")]
-    return "\n".join(lines).strip()
-
-
-def _chunk_text(text: str, max_chars: int) -> list[str]:
-    """Split text into chunks of at most ``max_chars``, breaking on spaces."""
-    if len(text) <= max_chars:
-        return [text]
-    chunks = []
-    remaining = text
-    while len(remaining) > max_chars:
-        window = remaining[:max_chars]
-        break_at = window.rfind(" ")
-        if break_at <= 0:
-            break_at = max_chars
-        chunks.append(remaining[:break_at].strip())
-        remaining = remaining[break_at:].strip()
-    if remaining:
-        chunks.append(remaining)
-    return [chunk for chunk in chunks if chunk]
-
-
-def _split_markdown_blocks(text: str) -> list[tuple[str | None, str]]:
-    blocks: list[tuple[str | None, str]] = []
-    heading: str | None = None
-    lines: list[str] = []
-    for line in text.split("\n"):
-        match = _HEADING_PATTERN.match(line)
-        if match:
-            if lines:
-                blocks.append((heading, "\n".join(lines).strip()))
-            heading = match.group(2)
-            lines = [line]
-        else:
-            lines.append(line)
-    if lines:
-        blocks.append((heading, "\n".join(lines).strip()))
-    return [(block_heading, block) for block_heading, block in blocks if block]
-
-
-def _split_paragraphs(text: str) -> list[tuple[str | None, str]]:
-    return [
-        (None, paragraph.strip())
-        for paragraph in _BLANK_LINE_PATTERN.split(text)
-        if paragraph.strip()
-    ]
-
-
-def load_text(
-    text: str,
+def store_upload(
+    upload_dir: str | Path,
     *,
     document_id: str,
-    title: str | None = None,
-    source: str | None = None,
-    media_type: str = "text/plain",
-    max_chars: int = DEFAULT_MAX_PASSAGE_CHARS,
-    metadata: Mapping[str, Any] | None = None,
+    title: str,
+    filename: str,
+    content: bytes,
 ) -> Document:
-    """Load plain text or Markdown and split it into passages."""
+    """Write an uploaded file to the upload directory and return its record.
+
+    The file is stored unchanged. A text companion is then created next to it
+    (see :func:`ensure_text`); a conversion failure never blocks the upload,
+    the agent can still read the PDF itself.
+    """
     if not isinstance(document_id, str) or not document_id.strip():
         raise ValueError("document_id must be a non-empty string")
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("text must be a non-empty string")
-    if not isinstance(max_chars, int) or max_chars < 1:
-        raise ValueError("max_chars must be a positive integer")
-
-    cleaned = _clean(text)
-    if media_type == "text/markdown":
-        blocks = _split_markdown_blocks(cleaned)
-    else:
-        blocks = _split_paragraphs(cleaned)
-
-    passages: list[Passage] = []
-    ordinal = 0
-    for heading, block in blocks:
-        for chunk in _chunk_text(block, max_chars):
-            passages.append(
-                Passage(
-                    passage_id=_passage_id(document_id, ordinal),
-                    document_id=document_id,
-                    ordinal=ordinal,
-                    text=chunk,
-                    heading=heading,
-                )
-            )
-            ordinal += 1
-    if not passages:
-        raise ValueError("text produced no passages")
-
+    if not isinstance(title, str):
+        raise ValueError("title must be a string")
+    if not isinstance(content, bytes):
+        raise ValueError("content must be bytes")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_MEDIA_TYPES:
+        raise ValueError(f"format de document non supporté : {suffix or '(aucun)'}")
+    upload_dir = Path(upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_dir / f"{document_id}{suffix}"
+    path.write_bytes(content)
+    ensure_text(path)
     return Document(
-        document_id=document_id,
-        title=title if title is not None else document_id,
-        source=source if source is not None else "",
-        media_type=media_type,
-        passages=tuple(passages),
-        metadata=dict(metadata) if metadata is not None else {},
-    )
-
-
-def load_file(
-    path: str | Path,
-    *,
-    document_id: str | None = None,
-    title: str | None = None,
-    max_chars: int = DEFAULT_MAX_PASSAGE_CHARS,
-) -> Document:
-    """Load a .txt, .md, .markdown or .pdf file, dispatching on the extension."""
-    path = Path(path)
-    suffix = path.suffix.lower()
-    if suffix not in _EXTENSION_MEDIA_TYPES:
-        raise ValueError(f"unsupported document extension: {suffix!r}")
-    if document_id is None:
-        document_id = path.stem
-    if title is None:
-        title = path.stem
-    if suffix == ".pdf":
-        return load_pdf(
-            path, document_id=document_id, title=title, max_chars=max_chars
-        )
-    text = path.read_text(encoding="utf-8")
-    return load_text(
-        text,
         document_id=document_id,
         title=title,
-        source=str(path),
-        media_type=_EXTENSION_MEDIA_TYPES[suffix],
-        max_chars=max_chars,
+        path=str(path),
+        media_type=SUPPORTED_MEDIA_TYPES[suffix],
     )
 
 
-def load_pdf(
-    path: str | Path,
-    *,
-    document_id: str | None = None,
-    title: str | None = None,
-    max_chars: int = DEFAULT_MAX_PASSAGE_CHARS,
-) -> Document:
-    """Load a PDF and create one or more passages per non-empty page."""
+# ----------------------------------------------------------------------
+# text conversion
+# ----------------------------------------------------------------------
+
+# cmex10 glyph codes → the symbol they draw (big operators and delimiters).
+_CMEX = {
+    "P": "∑", "X": "∑", "Q": "∏", "Y": "∏", "R": "∫", "Z": "∫",
+    "S": "⋃", "[": "⋃", "T": "⋂", "\\": "⋂", "V": "⋀", "W": "⋁", "U": "⊎",
+    " ": "(", "!": ")", "\x10": "(", "\x11": ")", "\x12": "(", "\x13": ")",
+    '"': "[", "#": "]", "(": "{", ")": "}", "\x08": "{", "\t": "}",
+    "b": "^", "z": "", "{": "", "|": "", "}": "",
+    "\x00": "(", "\x01": ")", "\x02": "[", "\x03": "]", "\x04": "⌊", "\x05": "⌋",
+    "\x06": "⌈", "\x07": "⌉", "\x0a": "⟨", "\x0b": "⟩", "\x0c": "|", "\x0d": "‖",
+    "\x0e": "/", "\x0f": "\\", "\x14": "[", "\x15": "]", "\x16": "⌊", "\x17": "⌋",
+    "\x18": "⌈", "\x19": "⌉", "\x1a": "{", "\x1b": "}", "\x1c": "⟨", "\x1d": "⟩",
+}
+# Control characters left over after mapping (never valid in a prompt).
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# msbm (blackboard bold) glyph codes.
+_BLACKBOARD = {"N": "ℕ", "R": "ℝ", "Z": "ℤ", "P": "ℙ", "E": "𝔼", "Q": "ℚ", "C": "ℂ"}
+# cmsy (math symbols) draws \\mathcal capitals with plain letter codes.
+_CALLIGRAPHIC = dict(zip(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "𝒜ℬ𝒞𝒟ℰℱ𝒢ℋℐ𝒥𝒦ℒℳ𝒩𝒪𝒫𝒬ℛ𝒮𝒯𝒰𝒱𝒲𝒳𝒴𝒵",
+))
+# LaTeX spacing accents → combining accents.
+_ACCENTS = {"´": "\u0301", "`": "\u0300", "¨": "\u0308", "ˆ": "\u0302"}
+
+
+def text_path(pdf_path: str | Path) -> Path:
+    """Return the path of the text companion of a deposited PDF."""
+    return Path(pdf_path).with_suffix(TEXT_SUFFIX)
+
+
+def ensure_text(pdf_path: str | Path) -> Path | None:
+    """Create the text companion of a PDF if missing; return its path.
+
+    Returns ``None`` when the PDF cannot be converted (missing file, damaged
+    PDF, converter not installed).
+    """
+    target = text_path(pdf_path)
+    if target.exists():
+        return target
     try:
-        from pypdf import PdfReader
-    except ImportError as error:
-        raise ImportError(
-            "PDF support requires pypdf; install it with `pip install pypdf`"
-        ) from error
+        text = extract_pdf_text(pdf_path)
+    except Exception:  # a broken PDF must not break the upload
+        return None
+    target.write_text(text, encoding="utf-8")
+    return target
 
-    path = Path(path)
-    if document_id is None:
-        document_id = path.stem
-    reader = PdfReader(str(path))
 
-    passages: list[Passage] = []
-    ordinal = 0
-    for page_number, page in enumerate(reader.pages, start=1):
-        try:
-            page_text = page.extract_text() or ""
-        except Exception:
-            page_text = ""
-        cleaned = _clean(page_text)
-        if not cleaned:
-            continue
-        for chunk in _chunk_text(cleaned, max_chars):
-            passages.append(
-                Passage(
-                    passage_id=_passage_id(document_id, ordinal),
-                    document_id=document_id,
-                    ordinal=ordinal,
-                    text=chunk,
-                    page=page_number,
-                )
-            )
-            ordinal += 1
-    if not passages:
-        raise ValueError(
-            "PDF has no extractable text layer; scanned documents require OCR"
-        )
+def read_text(pdf_path: str | Path) -> str | None:
+    """Return the converted text of a deposited PDF, converting it if needed."""
+    target = ensure_text(pdf_path)
+    if target is None:
+        return None
+    return _CONTROL.sub(" ", target.read_text(encoding="utf-8"))
 
-    return Document(
-        document_id=document_id,
-        title=title if title is not None else document_id,
-        source=str(path),
-        media_type="application/pdf",
-        passages=tuple(passages),
+
+def extract_pdf_text(pdf_path: str | Path) -> str:
+    """Convert a PDF to text with ``=== Page N ===`` markers."""
+    import pymupdf  # imported lazily: only needed when a PDF is converted
+
+    pages = []
+    with pymupdf.open(str(pdf_path)) as pdf:
+        for number, page in enumerate(pdf, start=1):
+            lines = []
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    rendered = _render_line(line.get("spans", []))
+                    if rendered is not None:
+                        lines.append(rendered)
+            pages.append(f"=== Page {number} ===\n" + _fix_accents("\n".join(lines)))
+    return _CONTROL.sub(" ", "\n\n".join(pages)) + "\n"
+
+
+def _render_line(spans: list[dict[str, Any]]) -> str | None:
+    spans = [span for span in spans if span.get("text")]
+    if not spans:
+        return None
+    largest = max(span["size"] for span in spans)
+    parts = []
+    for index, span in enumerate(spans):
+        text = span["text"]
+        font = span.get("font", "")
+        if "CMEX" in font.upper():
+            text = "".join(_CMEX.get(character, character) for character in text)
+        elif "MSBM" in font.upper():
+            text = "".join(_BLACKBOARD.get(character, character) for character in text)
+        elif "CMSY" in font.upper():
+            text = "".join(_CALLIGRAPHIC.get(character, character) for character in text)
+        small = span["size"] < 0.85 * largest
+        previous = [s for s in spans[:index] if s["size"] >= 0.85 * largest]
+        if small and text.strip() and previous and "CMEX" not in previous[-1].get("font", "").upper():
+            shift = span["origin"][1] - previous[-1]["origin"][1]
+            if shift > 0.8:
+                text = "_{" + text.strip() + "}"
+            elif shift < -0.8:
+                text = "^{" + text.strip() + "}"
+        parts.append(text)
+    rendered = "".join(parts)
+    # merge consecutive scripts: X_{n}_{+}_{k} → X_{n+k}
+    rendered = re.sub(r"\}_\{", "", rendered)
+    rendered = re.sub(r"\}\^\{", "", rendered)
+    return (
+        rendered.replace("7−→", "↦")
+        .replace("7→", "↦")
+        .replace("\u0338 =", "≠")
+        .replace("\u0338=", "≠")
+    )
+
+
+def _fix_accents(text: str) -> str:
+    def compose(match: re.Match[str]) -> str:
+        return unicodedata.normalize("NFC", match.group(2) + _ACCENTS[match.group(1)])
+
+    text = text.replace("ˆı", "î").replace("¨ı", "ï")
+    text = re.sub(r"([´`¨ˆ])\s?([A-Za-z])", compose, text)
+    return re.sub(
+        r"([A-Za-z])¸",
+        lambda match: unicodedata.normalize("NFC", match.group(1) + "̧"),
+        text,
     )

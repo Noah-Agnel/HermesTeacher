@@ -1,29 +1,46 @@
+{% set active_page = 'home' %}
 {% extends "base.html" %}
+{% from "_macros.html" import constellation %}
 {% block title %}Mes concepts — HermesTeacher{% endblock %}
 {% block content %}
-<div class="page-header">
-  <h1>Mes concepts</h1>
-  <a class="btn btn-primary" href="/concepts/new">+ Nouveau concept</a>
+<div class="page-head">
+  <div>
+    <h1>Mes concepts</h1>
+    <p class="lead">Chaque concept est une carte de sous-notions : elles s'allument à mesure que vous les maîtrisez.</p>
+  </div>
 </div>
 
 {% if concepts %}
-<div class="concept-grid">
+<div class="tiles">
   {% for concept in concepts %}
-  <a class="concept-card" href="/concepts/{{ concept.concept_id }}">
-    <div class="concept-card-title">{{ concept.title }}</div>
-    <div class="concept-card-phase">
-      <span class="badge badge-{{ concept.phase }}">{{ phase_label(concept.phase) }}</span>
+  <a class="tile" href="/concepts/{{ concept.concept_id }}">
+    <div class="tile-sky">
+      {% if concept.mini_graph %}
+        {{ constellation(concept.mini_graph, "Graphe de " ~ concept.title) }}
+      {% else %}
+        <span class="empty-sky">Graphe en préparation</span>
+      {% endif %}
     </div>
-    <div class="progress">
-      <div class="progress-bar" style="width: {{ (concept.progress * 100)|round }}%"></div>
+    <div class="title-line">
+      <h2>{{ concept.title }}</h2>
     </div>
-    <div class="concept-card-meta">
-      {{ (concept.progress * 100)|round }} % · {{ concept.concept_count }} sous-concepts
+    <div class="bar" aria-hidden="true"><span style="width: {{ (concept.progress * 100)|round }}%"></span></div>
+    <div class="tile-foot">
+      <span class="chip chip-{{ concept.phase }}">{{ phase_label(concept.phase) }}</span>
+      <span class="tile-meta">{{ (concept.progress * 100)|round|int }} % · {{ concept.concept_count }} sous-concepts</span>
     </div>
   </a>
   {% endfor %}
+  <a class="tile tile-new" href="/concepts/new">
+    <strong>Nouveau concept</strong>
+    <span>Déposez un cours, des TD ou des annales</span>
+  </a>
 </div>
 {% else %}
-<p class="empty">Aucun concept pour le moment. Cliquez sur « Nouveau concept » pour déposer vos documents et démarrer.</p>
+<div class="panel empty-state">
+  <h2>Votre premier concept</h2>
+  <p>Déposez un polycopié, des TD ou des annales et dites ce que vous voulez savoir faire. Le tuteur en tire un graphe de sous-notions et une courte évaluation de départ.</p>
+  <a class="btn btn-primary" href="/concepts/new">Créer un concept</a>
+</div>
 {% endif %}
 {% endblock %}

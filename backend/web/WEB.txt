@@ -9,11 +9,20 @@ progress: it delegates every learning-path decision to the backend engine in
 Pages
 -----
 - `/` lists the concepts in progress with their phase and progress bar.
-- `/concepts/new` deposits the documents (PDF, Markdown, text), the objectives
-  and the preferences, then starts the learning path.
+- `/profile` edits the learner's global profile: display name, learning
+  preferences and transversal weaknesses, shared by every concept.
+- `/concepts/new` deposits the documents (PDF), the objectives and the
+  preferences, then starts the learning path.
 - `/concepts/{id}` shows the progress bar, the concept graph and the current
   activity: initial evaluation, next lesson, next exercise, final exam or
-  remediation.
+  remediation. A generated course can be saved before moving on.
+- Every question of the initial evaluation, the exercises and the final exam
+  has a "Je ne sais pas" checkbox: the answer is graded 0 without calling the
+  agent. If grading fails, the page is shown again with the answers filled in.
+- If the initial evaluation fails after the graph was generated, the concept
+  is kept and its page offers "Générer l'évaluation initiale"
+  (`POST /concepts/{id}/evaluation/generate`), which retries only the
+  evaluation.
 - `/concepts/{id}/settings` edits the title, objectives, preferences, eta and
   theta of a concept.
 
@@ -21,35 +30,68 @@ Storage
 -------
 Each concept is an independent learning path stored in its own SQLite database
 (`data/concepts/{concept_id}.sqlite3`), created by `backend.tutor.storage`.
-The registry that lists the concepts lives in `data/profile.sqlite3`
-(`backend/web/profile.py`). This keeps the existing backend unchanged while
-several concepts are learnt in parallel.
+The registry that lists the concepts and the learner's global profile live in
+`data/profile.sqlite3` (`backend/web/profile.py`). Deposited documents are
+stored unchanged under `data/uploads/`.
 
 Model boundary
 --------------
-`backend/web/generators.py` provides:
+`backend/web/generators.py` provides `HermesGenerator`, which calls the
+Hermes agent as a subprocess (`hermes -z`, which prints only the final
+response). The text of the deposited documents (converted at upload, see
+`backend/tutor/DOCUMENTS.txt`) is placed in the prompt; the agent reads the
+learner's profile with its own tools and returns structured JSON; the backend
+validates and persists it. When the answer holds no JSON, the agent is run
+once more; the error then quotes the beginning of its answer. The answers of
+an evaluation or exam are graded in one call (`grade_responses`). The call times out after `TUTOR_HERMES_TIMEOUT`
+seconds (default 1800). The profile is not injected into the prompts: the agent reads it itself
+with the `profile` command (see the `hermes-teacher` skill, which lives in the
+repository at `.hermes/skills/hermes-teacher/`, and
+`backend/tutor/agent_tools.py`).
 
-- `DemoGenerator`, a deterministic stand-in that extracts a small concept
-  chain from the deposited documents and generates courses, exercises and
-  grades. It is used when no model is configured.
-- `OpenAICompleter`, which calls an OpenAI-compatible chat-completions
-  endpoint with the standard library. Set `TUTOR_LLM_BASE_URL`,
-  `TUTOR_LLM_API_KEY` and `TUTOR_LLM_MODEL`; the backend `PromptLLMGenerator`
-  builds the prompts.
-
-`TUTOR_DEMO=1` forces the demo generator, `TUTOR_DEMO=0` forces the API, and
-`TUTOR_DEMO=auto` (default) uses the demo when no API key is set.
+The agent must be installed and configured on the machine that runs the web
+application, and the repository must be the working directory of the subprocess
+so the project skill and the `agent_tools` commands are found.
 
 Running
 -------
     pip install -r requirements.txt
-    python -m backend.web
+    python3 -m backend.web
 
 Then open http://127.0.0.1:8000.
 
 Verification
 ------------
-`backend/tests/test_web.py` exercises the demo generator, the concept
+`backend/tests/test_web.py` exercises the scripted generator, the concept
 registry, the graph layout and the full HTTP flow: creating a concept,
 submitting the initial evaluation, generating a lesson and an exercise,
-submitting the exercise, the final exam and the remediation resume.
+saving a course, submitting the exercise, the final exam and the remediation
+resume.
+
+Interface (design)
+------------------
+Night-blue theme (`static/style.css`), Space Grotesk (headings) and Manrope
+(text), bundled under `static/vendor/fonts`. Signature: the "constellation",
+concepts drawn as points of light coloured by mastery, used on the home tiles,
+the side rail of a concept and the graph page.
+
+- `/concepts/{id}/graph`: interactive graph (Cytoscape + dagre, bundled):
+  zoom/pan, the prerequisite chain lights up on hover, mastery colours, locked
+  notions (a prerequisite below θ) dashed, current notion ringed.
+- Lessons, exercises, questions and feedback are Markdown with LaTeX
+  (`$...$`, `$$...$$`), rendered in the browser with marked + DOMPurify +
+  KaTeX (`static/app.js`). Answer boxes show a live math preview.
+- Libraries are bundled in `static/vendor` (versions in `VERSIONS.txt`): no
+  CDN call, the app works offline.
+
+Live progress
+-------------
+Slow actions run as background jobs (`backend/web/jobs.py`). Forms marked
+`data-job` post to `/api/...`, which answers 202 with a job; the page polls
+`GET /api/jobs/{id}` and shows the steps as a small constellation that lights
+up, the elapsed time and an activity feed read from the Hermes log
+(`$HERMES_HOME/logs/agent.log`: model calls, tools, retries). The step
+follows the generator method being called (`ReportingGenerator`). At most one
+job runs per concept. After an exercise, the job result carries the score,
+the feedback and the level before/after, shown as a result card. Without
+JavaScript the classic HTML routes still work.

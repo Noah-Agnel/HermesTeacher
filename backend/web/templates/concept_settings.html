@@ -1,15 +1,17 @@
 {% extends "base.html" %}
 {% block title %}Configuration — {{ concept.title }}{% endblock %}
+{% block container_class %}container-narrow{% endblock %}
 {% block content %}
-<h1>Configuration — {{ concept.title }}</h1>
+<a class="back-link" href="/concepts/{{ concept.concept_id }}">{{ concept.title }}</a>
+<div class="page-head"><div><h1>Configuration</h1><p class="lead">Objectif, préférences et réglages du parcours pour « {{ concept.title }} ».</p></div></div>
 
 {% if errors %}
-<div class="errors">
+<div class="errors" role="alert">
   {% for error in errors %}<p>{{ error }}</p>{% endfor %}
 </div>
 {% endif %}
 
-<form method="post" action="/concepts/{{ concept.concept_id }}/settings" class="form">
+<form method="post" action="/concepts/{{ concept.concept_id }}/settings" class="form panel">
   <label>Titre
     <input type="text" name="title" required value="{{ concept.title }}">
   </label>
@@ -27,9 +29,6 @@
         <option value="theorie" {% if concept.preferences.get('format') == 'theorie' %}selected{% endif %}>Théorie</option>
       </select>
     </label>
-    <label>Temps disponible (min/jour)
-      <input type="number" name="daily_minutes" min="0" value="{{ concept.preferences.get('daily_minutes', 20) }}">
-    </label>
   </div>
 
   <label>Points à privilégier
@@ -41,16 +40,18 @@
   </label>
 
   <div class="form-row">
-    <label>Taux d'apprentissage (eta)
+    <label>Vitesse d'apprentissage (η)
       <input type="number" name="eta" step="0.05" min="0" max="1" value="{{ concept.eta }}">
     </label>
-    <label>Seuil de maîtrise des prérequis (theta)
+    <label>Seuil des prérequis (θ)
       <input type="number" name="theta" step="0.05" min="0" max="1" value="{{ concept.theta }}">
     </label>
   </div>
 
-  <button class="btn btn-primary" type="submit">Enregistrer</button>
-  <a class="btn" href="/concepts/{{ concept.concept_id }}">Retour</a>
+  <div class="stage-actions">
+    <button class="btn btn-primary" type="submit">Enregistrer</button>
+    <a class="btn btn-quiet" href="/concepts/{{ concept.concept_id }}">Annuler</a>
+  </div>
 </form>
 
 <form method="post" action="/concepts/{{ concept.concept_id }}/delete" class="danger-zone">

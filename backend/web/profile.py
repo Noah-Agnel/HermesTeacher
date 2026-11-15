@@ -7,6 +7,7 @@ manages the registry that lists those concepts and the few global settings.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -32,6 +33,13 @@ CREATE TABLE IF NOT EXISTS concepts (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learner_profile (
+    learner_id TEXT PRIMARY KEY CHECK(length(trim(learner_id)) > 0),
+    display_name TEXT,
+    preferences_json TEXT NOT NULL DEFAULT '{}',
+    weaknesses_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -180,4 +188,63 @@ class ProfileStore:
                 """INSERT INTO settings (key, value) VALUES (?, ?)
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (key, value),
+            )
+
+    # ------------------------------------------------------------------
+    # global learner profile
+    # ------------------------------------------------------------------
+    def get_learner_profile(self, learner_id: str) -> dict[str, Any] | None:
+        """Return the learner's global profile, or None if it does not exist."""
+        if not isinstance(learner_id, str) or not learner_id.strip():
+            raise ValueError("learner_id must be a non-empty string")
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM learner_profile WHERE learner_id = ?", (learner_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        profile = dict(row)
+        profile["preferences"] = json.loads(profile.pop("preferences_json"))
+        profile["weaknesses"] = json.loads(profile.pop("weaknesses_json"))
+        return profile
+
+    def save_learner_profile(
+        self,
+        learner_id: str,
+        *,
+        display_name: str | None = None,
+        preferences: Mapping[str, Any] | None = None,
+        weaknesses: list[Any] | None = None,
+    ) -> None:
+        """Insert or replace the learner's global profile.
+
+        ``preferences`` describes how the learner likes to learn; ``weaknesses``
+        is a list of transversal points the agent identified.
+        """
+        if not isinstance(learner_id, str) or not learner_id.strip():
+            raise ValueError("learner_id must be a non-empty string")
+        if preferences is not None and not isinstance(preferences, Mapping):
+            raise ValueError("preferences must be a mapping")
+        if weaknesses is not None and not isinstance(weaknesses, list):
+            raise ValueError("weaknesses must be a list")
+        preferences_json = self._encode_preferences(dict(preferences or {}))
+        try:
+            weaknesses_json = json.dumps(weaknesses or [], ensure_ascii=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "weaknesses must contain JSON-compatible values"
+            ) from error
+        now = self._now()
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO learner_profile
+                   (learner_id, display_name, preferences_json, weaknesses_json,
+                    updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(learner_id) DO UPDATE SET
+                       display_name = excluded.display_name,
+                       preferences_json = excluded.preferences_json,
+                       weaknesses_json = excluded.weaknesses_json,
+                       updated_at = excluded.updated_at""",
+                (learner_id, display_name, preferences_json, weaknesses_json, now),
             )

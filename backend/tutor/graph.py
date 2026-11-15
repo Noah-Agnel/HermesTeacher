@@ -33,22 +33,32 @@ def _require_string(value: Any, name: str) -> str:
 
 @dataclass(frozen=True)
 class Evidence:
-    """A citation of the passage that supports a concept or a relation."""
+    """A citation of a document that supports a concept or a relation.
+
+    The backend does not split documents into passages, so a citation points
+    at a document and optionally at a page and a short quote.
+    """
 
     document_id: str
-    passage_id: str
+    page: int | None = None
     quote: str | None = None
 
     def __post_init__(self) -> None:
         _require_string(self.document_id, "document_id")
-        _require_string(self.passage_id, "passage_id")
+        if self.page is not None:
+            if (
+                not isinstance(self.page, int)
+                or isinstance(self.page, bool)
+                or self.page < 1
+            ):
+                raise ValueError("page must be a positive integer or None")
         if self.quote is not None and not isinstance(self.quote, str):
             raise ValueError("quote must be a string or None")
 
     def to_mapping(self) -> dict[str, Any]:
         return {
             "document_id": self.document_id,
-            "passage_id": self.passage_id,
+            "page": self.page,
             "quote": self.quote,
         }
 
@@ -56,10 +66,10 @@ class Evidence:
     def from_mapping(cls, data: Any) -> "Evidence":
         if not isinstance(data, Mapping):
             raise ValueError("evidence must be a mapping")
-        _check_keys(data, {"document_id", "passage_id", "quote"}, "evidence")
+        _check_keys(data, {"document_id", "page", "quote"}, "evidence")
         return cls(
             document_id=_require_string(data.get("document_id"), "document_id"),
-            passage_id=_require_string(data.get("passage_id"), "passage_id"),
+            page=data.get("page"),
             quote=data.get("quote"),
         )
 
@@ -205,20 +215,22 @@ class ConceptGraphProposal:
             raise ValueError("notes must be a string")
 
     @staticmethod
-    def _normalize_known_passages(known_passages: Iterable[str] | Mapping[str, Any]) -> set[str]:
-        if isinstance(known_passages, Mapping):
-            return set(known_passages.keys())
-        return set(known_passages)
+    def _normalize_known_documents(
+        known_documents: Iterable[str] | Mapping[str, Any],
+    ) -> set[str]:
+        if isinstance(known_documents, Mapping):
+            return set(known_documents.keys())
+        return set(known_documents)
 
     def validate(
         self,
-        known_passages: Iterable[str] | Mapping[str, Any] | None = None,
+        known_documents: Iterable[str] | Mapping[str, Any] | None = None,
     ) -> ValidationReport:
         """Return the issues in the proposal.
 
-        ``known_passages`` is an optional collection of passage ids (or a
+        ``known_documents`` is an optional collection of document ids (or a
         mapping keyed by them). When provided, evidence citing an unknown
-        passage is reported.
+        document is reported.
         """
         issues: list[GraphIssue] = []
         concept_ids = [concept.concept_id for concept in self.concepts]
@@ -279,25 +291,25 @@ class ConceptGraphProposal:
                     )
                 )
 
-        if known_passages is not None:
-            known = self._normalize_known_passages(known_passages)
+        if known_documents is not None:
+            known = self._normalize_known_documents(known_documents)
             for concept in self.concepts:
                 for item in concept.evidence:
-                    if item.passage_id not in known:
+                    if item.document_id not in known:
                         issues.append(
                             GraphIssue(
-                                "unknown_passage",
-                                f"concept {concept.concept_id!r} cites unknown passage {item.passage_id!r}",
+                                "unknown_document",
+                                f"concept {concept.concept_id!r} cites unknown document {item.document_id!r}",
                                 concept_id=concept.concept_id,
                             )
                         )
             for edge in self.edges:
                 for item in edge.evidence:
-                    if item.passage_id not in known:
+                    if item.document_id not in known:
                         issues.append(
                             GraphIssue(
-                                "unknown_passage",
-                                f"edge {edge.prerequisite_id!r} -> {edge.concept_id!r} cites unknown passage {item.passage_id!r}",
+                                "unknown_document",
+                                f"edge {edge.prerequisite_id!r} -> {edge.concept_id!r} cites unknown document {item.document_id!r}",
                                 concept_id=edge.concept_id,
                                 prerequisite_id=edge.prerequisite_id,
                             )
@@ -346,6 +358,22 @@ class ConceptGraphProposal:
     def topological_order(self) -> tuple[str, ...]:
         """Return a deterministic prerequisite-safe order for a valid proposal."""
         return topological_order(self.to_domain_concepts())
+
+    def adjacency_list(self) -> dict[str, list[str]]:
+        """Return the prerequisite adjacency list: concept -> prerequisites.
+
+        Each key is a proposed concept; its value lists the concept ids that
+        must be mastered first. The graph is directed and acyclic.
+        """
+        adjacency: dict[str, list[str]] = {
+            concept.concept_id: [] for concept in self.concepts
+        }
+        for edge in self.edges:
+            if edge.concept_id in adjacency and edge.prerequisite_id in adjacency:
+                adjacency[edge.concept_id].append(edge.prerequisite_id)
+        for concept_id in adjacency:
+            adjacency[concept_id] = sorted(set(adjacency[concept_id]))
+        return adjacency
 
     def add_concept(self, concept: ProposedConcept) -> "ConceptGraphProposal":
         if not isinstance(concept, ProposedConcept):

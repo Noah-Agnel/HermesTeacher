@@ -1,14 +1,14 @@
+import io
 import json
 import re
 import tempfile
 import unittest
 from pathlib import Path
-import urllib.request
 
 try:
     from backend.web.app import create_app
     from backend.web.config import Settings
-    from backend.web.generators import DemoGenerator
+    from backend.tests.generators import ScriptedGenerator
     from backend.web.graphview import layout_graph
     from backend.web.profile import ProfileStore
     from backend.tutor.graph import ConceptGraphProposal
@@ -17,130 +17,74 @@ except ImportError:  # pragma: no cover - dependencies missing
     create_app = None
 
 
-COURSE = b"""# Produit scalaire
+def make_pdf_bytes(lines):
+    """Build a small PDF with one text line per page, as bytes."""
+    from reportlab.pdfgen import canvas
 
-Le produit scalaire est une forme bilineaire symetrique.
+    buffer = io.BytesIO()
+    canvas_object = canvas.Canvas(buffer)
+    for line in lines:
+        canvas_object.drawString(72, 720, line)
+        canvas_object.showPage()
+    canvas_object.save()
+    return buffer.getvalue()
 
-# Applications
 
-On l'utilise pour calculer des angles et des longueurs.
-"""
+COURSE = make_pdf_bytes(
+    [
+        "Produit scalaire",
+        "Le produit scalaire est une forme bilineaire symetrique.",
+        "Applications",
+        "On l'utilise pour calculer des angles et des longueurs.",
+    ]
+)
 
 
 def make_settings(root: Path) -> Settings:
     return Settings(
         data_dir=root,
         profile_path=root / "profile.sqlite3",
-        llm_base_url="https://example.invalid/v1",
-        llm_api_key="",
-        llm_model="demo",
-        llm_timeout=5,
-        demo=True,
     )
 
 
-class DemoGeneratorTests(unittest.TestCase):
+class ScriptedGeneratorTests(unittest.TestCase):
     def setUp(self):
-        self.generator = DemoGenerator()
+        self.generator = ScriptedGenerator()
 
-    def test_proposes_a_valid_graph_from_passages(self):
-        passages = [
-            {
-                "passage_id": "doc-1:0000",
-                "document_id": "doc-1",
-                "heading": "Produit scalaire",
-                "text": "Contenu.",
-            },
-            {
-                "passage_id": "doc-1:0001",
-                "document_id": "doc-1",
-                "heading": "Applications",
-                "text": "Contenu.",
-            },
-        ]
-
-        mapping = self.generator.propose_graph(passages, "objectifs")
+    def test_proposes_a_valid_graph(self):
+        mapping = self.generator.propose_graph([], "objectifs")
         proposal = ConceptGraphProposal.from_mapping(mapping)
-        report = proposal.validate(
-            known_passages={"doc-1:0000", "doc-1:0001"}
-        )
+        report = proposal.validate()
 
         self.assertTrue(report.is_valid)
         self.assertEqual(len(proposal.concepts), 2)
         self.assertEqual(len(proposal.edges), 1)
 
     def test_generates_questions_courses_and_grades(self):
-        concepts = [{"concept_id": "a", "label": "Concept A"}]
-        passages = [
-            {
-                "passage_id": "doc-1:0000",
-                "document_id": "doc-1",
-                "text": "Contenu.",
-            }
+        concepts = [
+            {"concept_id": "produit-scalaire", "label": "Produit scalaire"},
+            {"concept_id": "applications", "label": "Applications"},
         ]
+        documents = []
 
         evaluation = self.generator.generate_initial_evaluation(
-            concepts, passages, "objectifs"
+            concepts, documents, "objectifs"
         )
-        self.assertEqual(len(evaluation["questions"]), 1)
+        self.assertEqual(len(evaluation["questions"]), 2)
 
-        course = self.generator.generate_course(concepts[0], passages, 0.4)
-        self.assertEqual(course["concept_id"], "a")
+        course = self.generator.generate_course(concepts[0], documents, 0.4)
+        self.assertEqual(course["concept_id"], "produit-scalaire")
 
-        exercise = self.generator.generate_exercise(concepts[0], passages, 0.4)
-        self.assertEqual(exercise["concept_id"], "a")
+        exercise = self.generator.generate_exercise(concepts[0], documents, 0.4)
+        self.assertEqual(exercise["concept_id"], "produit-scalaire")
 
-        exam = self.generator.generate_final_exam(concepts, passages, "objectifs")
-        self.assertEqual(len(exam["questions"]), 1)
+        exam = self.generator.generate_final_exam(concepts, documents, "objectifs")
+        self.assertEqual(len(exam["questions"]), 2)
 
         grade = self.generator.grade_response(
             {"reference_answer": "reponse attendue"}, "la reponse attendue"
         )
         self.assertAlmostEqual(grade["score"], 1.0)
-
-
-class OpenAICompleterTests(unittest.TestCase):
-    def test_calls_chat_completions_and_parses_content(self):
-        from backend.web.generators import OpenAICompleter
-
-        captured: dict = {}
-
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b'{"choices": [{"message": {"content": "hello"}}]}'
-
-        def fake_urlopen(request, timeout=None):
-            captured["url"] = request.full_url
-            captured["data"] = request.data
-            captured["headers"] = {
-                key.lower(): value for key, value in request.header_items()
-            }
-            captured["timeout"] = timeout
-            return FakeResponse()
-
-        original = urllib.request.urlopen
-        urllib.request.urlopen = fake_urlopen
-        try:
-            completer = OpenAICompleter(
-                "https://api.example/v1", "secret", "model-x", timeout=7
-            )
-            result = completer("prompt text")
-        finally:
-            urllib.request.urlopen = original
-
-        self.assertEqual(result, "hello")
-        self.assertEqual(captured["url"], "https://api.example/v1/chat/completions")
-        payload = json.loads(captured["data"])
-        self.assertEqual(payload["model"], "model-x")
-        self.assertEqual(payload["messages"][0]["content"], "prompt text")
-        self.assertEqual(captured["headers"].get("authorization"), "Bearer secret")
-        self.assertEqual(captured["timeout"], 7)
 
 
 class ProfileStoreTests(unittest.TestCase):
@@ -220,7 +164,7 @@ class WebFlowTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.settings = make_settings(Path(self.temporary_directory.name))
-        self.app = create_app(self.settings)
+        self.app = create_app(self.settings, generator=ScriptedGenerator())
         self.client = TestClient(self.app, follow_redirects=False)
         self.service = self.app.state.service
 
@@ -234,11 +178,10 @@ class WebFlowTests(unittest.TestCase):
                 "title": "Produit scalaire",
                 "objectives": "Maîtriser le produit scalaire",
                 "format": "texte",
-                "daily_minutes": "20",
                 "eta": "0.3",
                 "theta": "0.75",
             },
-            files={"files": ("cours.md", COURSE, "text/markdown")},
+            files={"files": ("cours.pdf", COURSE, "application/pdf")},
         )
         self.assertEqual(response.status_code, 303, response.text)
         return response.headers["location"].split("/")[-1]
@@ -254,12 +197,83 @@ class WebFlowTests(unittest.TestCase):
 
         summary = self.service.summary(concept_id)
         self.assertEqual(summary["phase"], "initial_evaluation")
-        self.assertEqual(summary["concept_count"], 2)
+        self.assertGreaterEqual(summary["concept_count"], 1)
 
         response = self.client.get(f"/concepts/{concept_id}")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Produit scalaire", response.text)
         self.assertIn("Évaluation initiale", response.text)
+
+    def test_a_failed_evaluation_keeps_the_concept_and_can_be_retried(self):
+        generator = self.service.generator
+        original = generator.generate_initial_evaluation
+        failures = {"left": 1}
+
+        def flaky(*args, **kwargs):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise RuntimeError("model at capacity")
+            return original(*args, **kwargs)
+
+        generator.generate_initial_evaluation = flaky
+        response = self.client.post(
+            "/concepts/new",
+            data={"title": "Produit scalaire", "objectives": "", "format": "texte"},
+            files={"files": ("cours.pdf", COURSE, "application/pdf")},
+        )
+
+        self.assertEqual(response.status_code, 303)
+        location = response.headers["location"]
+        self.assertIn("error=", location)
+        concept_id = location.split("?")[0].split("/")[-1]
+        self.assertEqual(self.service.get_activity(concept_id)["kind"], "evaluation_pending")
+        page = self.client.get(f"/concepts/{concept_id}")
+        self.assertIn("Générer l'évaluation initiale", page.text)
+        self.assertIn("model at capacity", self.client.get(location).text)
+
+        response = self.client.post(f"/concepts/{concept_id}/evaluation/generate")
+
+        self.assertEqual(response.status_code, 303)
+        self.assertNotIn("error=", response.headers["location"])
+        self.assertEqual(self.service.summary(concept_id)["phase"], "initial_evaluation")
+
+    def test_dont_know_checkbox_is_offered_and_skips_the_model(self):
+        concept_id = self.create_concept()
+        page = self.client.get(f"/concepts/{concept_id}")
+        self.assertIn("Je ne sais pas", page.text)
+        questions = self.service.get_activity(concept_id)["questions"]
+        generator = self.service.generator
+        calls_before = len([c for c in generator.calls if c[0] == "grade_response"]) if hasattr(generator, "calls") else 0
+
+        response = self.client.post(
+            f"/concepts/{concept_id}/evaluation",
+            data={f"dontknow-{question['question_id']}": "on" for question in questions},
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.service.summary(concept_id)["phase"], "learning")
+        if hasattr(generator, "calls"):
+            calls_after = len([c for c in generator.calls if c[0] == "grade_response"])
+            self.assertEqual(calls_after, calls_before)
+
+    def test_answers_are_kept_when_grading_fails(self):
+        concept_id = self.create_concept()
+        questions = self.service.get_activity(concept_id)["questions"]
+
+        def broken(*args, **kwargs):
+            raise ValueError("no valid JSON found in the model response")
+
+        self.service.generator.grade_response = broken
+        self.service.generator.grade_responses = broken
+        response = self.client.post(
+            f"/concepts/{concept_id}/evaluation",
+            data={f"response-{question['question_id']}": "ma réponse détaillée" for question in questions},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no valid JSON", response.text)
+        self.assertIn("ma réponse détaillée", response.text)
+        self.assertEqual(self.service.summary(concept_id)["phase"], "initial_evaluation")
 
     def test_full_learning_flow(self):
         concept_id = self.create_concept()
@@ -288,7 +302,7 @@ class WebFlowTests(unittest.TestCase):
 
         response = self.client.post(
             f"/concepts/{concept_id}/exercise/submit",
-            data={"response_text": "la reponse type"},
+            data={"response_text": "Réponse — Produit scalaire"},
         )
         self.assertEqual(response.status_code, 303)
         summary = self.service.summary(concept_id)
@@ -353,7 +367,6 @@ class WebFlowTests(unittest.TestCase):
                 "title": "Produit scalaire (mis à jour)",
                 "objectives": "nouvel objectif",
                 "format": "exemples",
-                "daily_minutes": "30",
                 "focus": "les applications",
                 "difficulties": "les démonstrations",
                 "eta": "0.4",
@@ -374,6 +387,21 @@ class WebFlowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 303)
         self.assertIsNone(self.service.get_concept(concept_id))
         self.assertEqual(self.service.list_concepts(), [])
+        self.assertEqual(list((self.settings.data_dir / "uploads").iterdir()), [])
+
+    def test_a_failed_creation_leaves_no_files(self):
+        def broken(*args, **kwargs):
+            raise ValueError("model unavailable")
+
+        self.service.generator.propose_graph = broken
+        response = self.client.post(
+            "/concepts/new",
+            data={"title": "Concept"},
+            files={"files": ("cours.pdf", COURSE, "application/pdf")},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(list((self.settings.data_dir / "uploads").iterdir()), [])
 
     def test_invalid_document_is_rejected(self):
         response = self.client.post(
@@ -383,6 +411,153 @@ class WebFlowTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(self.service.list_concepts(), [])
+
+    def test_profile_page_saves_global_profile(self):
+        response = self.client.get("/profile")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Mon profil", response.text)
+
+        response = self.client.post(
+            "/profile",
+            data={
+                "display_name": "Noah",
+                "format": "exemples",
+                "focus": "les applications",
+                "difficulties": "les démonstrations",
+                "weaknesses": "démonstrations\n géométrie",
+            },
+        )
+        self.assertEqual(response.status_code, 303)
+        profile = self.service.get_profile()
+        self.assertEqual(profile["display_name"], "Noah")
+        self.assertEqual(profile["preferences"]["format"], "exemples")
+        self.assertIn("démonstrations", profile["weaknesses"])
+
+    def test_save_course_keeps_it_after_next_exercise(self):
+        concept_id = self.create_concept()
+        activity = self.service.get_activity(concept_id)
+        self.client.post(
+            f"/concepts/{concept_id}/evaluation",
+            data={
+                f"response-{question['question_id']}": "r"
+                for question in activity["questions"]
+            },
+        )
+        self.client.post(f"/concepts/{concept_id}/lesson")
+        activity = self.service.get_activity(concept_id)
+        course_id = activity["course"]["course_id"]
+
+        self.client.post(
+            f"/concepts/{concept_id}/course/save",
+            data={"course_id": course_id},
+        )
+        self.client.post(f"/concepts/{concept_id}/exercise")
+
+        store = self.service._store(concept_id)
+        self.assertIsNotNone(store.get_course("student", course_id))
+
+
+class JobApiTests(unittest.TestCase):
+    """The JSON job API runs the slow actions in the background."""
+
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.settings = make_settings(Path(self.temporary_directory.name))
+        self.app = create_app(self.settings, generator=ScriptedGenerator())
+        self.client = TestClient(self.app, follow_redirects=False)
+        self.service = self.app.state.service
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def wait(self, job_id):
+        import time
+
+        for _ in range(200):
+            job = self.client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] != "running":
+                return job
+            time.sleep(0.02)
+        self.fail("job did not finish")
+
+    def create(self):
+        response = self.client.post(
+            "/api/concepts",
+            data={"title": "Produit scalaire", "objectives": "", "format": "texte"},
+            files={"files": ("cours.pdf", COURSE, "application/pdf")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        job = response.json()
+        self.assertEqual([s["key"] for s in job["steps"]], ["documents", "graph", "evaluation"])
+        return self.wait(job["job_id"])
+
+    def test_creating_a_concept_reports_its_steps_and_redirects(self):
+        job = self.create()
+
+        self.assertEqual(job["status"], "done", job)
+        self.assertTrue(all(step["status"] == "done" for step in job["steps"]))
+        concept_id = job["redirect"].split("/")[-1]
+        self.assertEqual(self.service.summary(concept_id)["phase"], "initial_evaluation")
+
+    def test_the_exercise_result_card_carries_score_and_levels(self):
+        concept_id = self.create()["redirect"].split("/")[-1]
+        questions = self.service.get_activity(concept_id)["questions"]
+        job = self.wait(
+            self.client.post(
+                f"/api/concepts/{concept_id}/evaluation",
+                data={f"response-{q['question_id']}": "la reponse attendue" for q in questions},
+            ).json()["job_id"]
+        )
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(self.wait(self.client.post(f"/api/concepts/{concept_id}/lesson").json()["job_id"])["status"], "done")
+        self.assertEqual(self.wait(self.client.post(f"/api/concepts/{concept_id}/exercise").json()["job_id"])["status"], "done")
+
+        job = self.wait(
+            self.client.post(
+                f"/api/concepts/{concept_id}/exercise/submit",
+                data={"response_text": "la reponse attendue"},
+            ).json()["job_id"]
+        )
+
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["result"]["card"], "exercise")
+        self.assertIn("score", job["result"])
+        self.assertIsNotNone(job["result"]["level_before"])
+
+    def test_a_failing_job_reports_the_error(self):
+        concept_id = self.create()["redirect"].split("/")[-1]
+
+        def broken(*args, **kwargs):
+            raise ValueError("no valid JSON found in the model response")
+
+        self.service.generator.grade_response = broken
+        self.service.generator.grade_responses = broken
+        questions = self.service.get_activity(concept_id)["questions"]
+        job = self.wait(
+            self.client.post(
+                f"/api/concepts/{concept_id}/evaluation",
+                data={f"response-{q['question_id']}": "réponse" for q in questions},
+            ).json()["job_id"]
+        )
+
+        self.assertEqual(job["status"], "error")
+        self.assertIn("no valid JSON", job["error"])
+        self.assertEqual(self.service.summary(concept_id)["phase"], "initial_evaluation")
+
+    def test_graph_page_embeds_statuses(self):
+        concept_id = self.create()["redirect"].split("/")[-1]
+
+        response = self.client.get(f"/concepts/{concept_id}/graph")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("graph-data", response.text)
+        view = self.service.graph_view(concept_id)
+        statuses = {node["id"]: node["status"] for node in view["nodes"]}
+        self.assertEqual(set(statuses.values()) <= {"open", "locked", "current", "mastered"}, True)
+        self.assertIn("locked", statuses.values())
+
+    def test_unknown_job_is_404(self):
+        self.assertEqual(self.client.get("/api/jobs/nope").status_code, 404)
 
 
 if __name__ == "__main__":

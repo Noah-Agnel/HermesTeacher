@@ -1,26 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Nouveau concept — HermesTeacher{% endblock %}
+{% block container_class %}container-narrow{% endblock %}
 {% block content %}
-<h1>Nouveau concept</h1>
-<p class="lead">Déposez vos documents de cours, exercices ou examens, puis précisez vos objectifs. Le tuteur propose un graphe de sous-concepts et une évaluation initiale.</p>
+<a class="back-link" href="/">Mes concepts</a>
+<div class="page-head">
+  <div>
+    <h1>Nouveau concept</h1>
+    <p class="lead">Déposez vos documents et précisez votre objectif. Le tuteur lit le cours, en tire un graphe de sous-notions, puis prépare une évaluation de départ.</p>
+  </div>
+</div>
 
 {% if errors %}
-<div class="errors">
+<div class="errors" role="alert">
   {% for error in errors %}<p>{{ error }}</p>{% endfor %}
 </div>
 {% endif %}
 
-<form method="post" action="/concepts/new" enctype="multipart/form-data" class="form">
+<form method="post" action="/concepts/new" enctype="multipart/form-data" class="form panel"
+      data-job="/api/concepts" data-job-title="Création du concept">
   <label>Titre du concept
-    <input type="text" name="title" required value="{{ title }}" placeholder="Ex. Produit scalaire">
+    <input type="text" name="title" required value="{{ title }}" placeholder="Ex. Chaînes de Markov">
   </label>
 
-  <label>Documents (cours, exercices, examens — PDF, Markdown ou texte)
-    <input type="file" name="files" multiple accept=".pdf,.md,.markdown,.txt">
+  <label class="dropzone" data-dropzone>
+    <input type="file" name="files" multiple accept=".pdf,application/pdf">
+    <strong>Déposez vos PDF ici</strong>
+    <span>ou cliquez pour choisir : polycopié, TD, annales</span>
+    <span class="file-list" data-file-list></span>
   </label>
 
-  <label>Objectifs / consignes (optionnel)
-    <textarea name="objectives" rows="4" placeholder="Ex. : maîtriser le produit scalaire ; insister sur les applications concrètes ; je bloque sur les démonstrations.">{{ objectives }}</textarea>
+  <label>Objectif
+    <textarea name="objectives" rows="3" placeholder="Ex. Comprendre le cours assez bien pour refaire les exercices des TD.">{{ objectives }}</textarea>
   </label>
 
   <div class="form-row">
@@ -32,31 +42,33 @@
         <option value="theorie" {% if format == 'theorie' %}selected{% endif %}>Théorie</option>
       </select>
     </label>
-    <label>Temps disponible (min/jour)
-      <input type="number" name="daily_minutes" min="0" value="{{ daily_minutes }}">
-    </label>
   </div>
 
-  <label>Points à privilégier (optionnel)
-    <input type="text" name="focus" value="{{ focus }}" placeholder="Ex. : les applications du produit scalaire">
-  </label>
-
-  <label>Points de difficulté (optionnel)
-    <input type="text" name="difficulties" value="{{ difficulties }}" placeholder="Ex. : je struggle avec les démonstrations">
-  </label>
-
   <details class="advanced">
-    <summary>Réglages avancés</summary>
-    <div class="form-row">
-      <label>Taux d'apprentissage (eta)
-        <input type="number" name="eta" step="0.05" min="0" max="1" value="{{ eta }}">
+    <summary>Précisions et réglages</summary>
+    <div class="form">
+      <label>Points à privilégier
+        <input type="text" name="focus" value="{{ focus }}" placeholder="Ex. les probabilités invariantes">
       </label>
-      <label>Seuil de maîtrise des prérequis (theta)
-        <input type="number" name="theta" step="0.05" min="0" max="1" value="{{ theta }}">
+      <label>Points de difficulté
+        <input type="text" name="difficulties" value="{{ difficulties }}" placeholder="Ex. les démonstrations">
       </label>
+      <div class="form-row">
+        <label>Vitesse d'apprentissage (η)
+          <input type="number" name="eta" step="0.05" min="0" max="1" value="{{ eta }}">
+          <span class="field-help">Poids d'un exercice dans la mise à jour du niveau.</span>
+        </label>
+        <label>Seuil des prérequis (θ)
+          <input type="number" name="theta" step="0.05" min="0" max="1" value="{{ theta }}">
+          <span class="field-help">Niveau à atteindre avant de débloquer la suite.</span>
+        </label>
+      </div>
     </div>
   </details>
 
-  <button class="btn btn-primary" type="submit">Créer le concept</button>
+  <div class="stage-actions">
+    <button class="btn btn-primary" type="submit">Créer le concept</button>
+    <span class="hint">Compter 3 à 8 minutes avec le modèle gratuit.</span>
+  </div>
 </form>
 {% endblock %}

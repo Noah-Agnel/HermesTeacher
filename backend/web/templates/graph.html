@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Graphe — {{ concept.title }}{% endblock %}
+{% block body_class %}graph-page{% endblock %}
+{% block head %}
+  <script defer src="/static/vendor/cytoscape.min.js"></script>
+  <script defer src="/static/vendor/cytoscape-dagre.js"></script>
+  <script defer src="/static/graph.js?v={{ asset_version }}"></script>
+{% endblock %}
+{% block content %}
+<a class="back-link" href="/concepts/{{ concept.concept_id }}">{{ concept.title }}</a>
+<div class="page-head">
+  <div>
+    <h1>Graphe des sous-concepts</h1>
+    <p class="lead">Une flèche va d'un prérequis vers la notion qui en dépend. Survolez une notion pour voir tout ce qu'elle demande.</p>
+  </div>
+</div>
+
+{% if graph %}
+<div class="graph-frame">
+  <div id="graph" role="img" aria-label="Graphe des sous-concepts de {{ concept.title }}"></div>
+  <div class="graph-tools">
+    <button class="btn" type="button" data-graph="fit">Recentrer</button>
+    <button class="btn" type="button" data-graph="direction">Orientation</button>
+  </div>
+  <div class="node-card" id="node-card" aria-live="polite"></div>
+  <div class="legend">
+    <span><i class="ramp"></i>Maîtrise 0 → 100 %</span>
+    <span><i class="ring-current"></i>En cours</span>
+    <span><i class="locked"></i>Prérequis à consolider</span>
+  </div>
+</div>
+<script type="application/json" id="graph-data">{{ graph | tojson }}</script>
+<noscript><p class="hint">Le graphe interactif nécessite JavaScript.</p></noscript>
+{% else %}
+<div class="panel empty-state"><h2>Pas encore de graphe</h2><p>Le graphe apparaît une fois le concept créé.</p></div>
+{% endif %}
+{% endblock %}

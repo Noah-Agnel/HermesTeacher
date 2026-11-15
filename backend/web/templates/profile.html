@@ -1,0 +1,39 @@
+{% set active_page = 'profile' %}
+{% extends "base.html" %}
+{% block title %}Mon profil — HermesTeacher{% endblock %}
+{% block container_class %}container-narrow{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Mon profil</h1>
+<p class="lead">Vos préférences et vos points faibles, partagés par tous vos concepts. Le tuteur les relit avant chaque leçon.</p></div></div>
+
+<form method="post" action="/profile" class="form panel">
+  <label>Nom affiché
+    <input type="text" name="display_name" value="{{ profile.display_name or '' }}" placeholder="Ex. : Noah">
+  </label>
+
+  <div class="form-row">
+    <label>Format préféré
+      <select name="format">
+        <option value="texte" {% if profile.preferences.get('format') == 'texte' %}selected{% endif %}>Texte</option>
+        <option value="exemples" {% if profile.preferences.get('format') == 'exemples' %}selected{% endif %}>Par l'exemple</option>
+        <option value="visuel" {% if profile.preferences.get('format') == 'visuel' %}selected{% endif %}>Visuel</option>
+        <option value="theorie" {% if profile.preferences.get('format') == 'theorie' %}selected{% endif %}>Théorie</option>
+      </select>
+    </label>
+  </div>
+
+  <label>Points à privilégier (optionnel)
+    <input type="text" name="focus" value="{{ profile.preferences.get('focus', '') }}">
+  </label>
+
+  <label>Points de difficulté (optionnel)
+    <input type="text" name="difficulties" value="{{ profile.preferences.get('difficulties', '') }}">
+  </label>
+
+  <label>Points faibles transverses (un par ligne)
+    <textarea name="weaknesses" rows="4" placeholder="Ex. : les démonstrations, la géométrie dans l'espace">{{ profile.weaknesses|join('\n') }}</textarea>
+  </label>
+
+  <div class="stage-actions"><button class="btn btn-primary" type="submit">Enregistrer le profil</button></div>
+</form>
+{% endblock %}
